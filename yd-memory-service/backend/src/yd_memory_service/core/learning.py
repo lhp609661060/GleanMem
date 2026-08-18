@@ -115,8 +115,11 @@ class LearningModel:
             return []
 
         # 3-5. 按 source 分派分析并处理
-        chat_events = [e for e in events if e.source != "observation"]
+        # 注意：分派必须**白名单**式（== "chat"/"example"），不能写 != "observation"——
+        # 否则 V1.5 的 source=codebase 事件会误入 chat 分支被当聊天素材学习。
+        chat_events = [e for e in events if e.source in ("chat", "example")]
         obs_events = [e for e in events if e.source == "observation"]
+        codebase_events = [e for e in events if e.source == "codebase"]
         processed: list[MemoryDecision] = []
         chat_raw: str | None = None
         obs_raw: str | None = None
@@ -174,10 +177,108 @@ class LearningModel:
                 )
             processed += ds
 
+        # codebase 分支（V1.5b）：指纹 diff → 单模块重生成，产物是 wiki 知识卡
+        if codebase_events:
+            processed += await self._codebase_incremental(agent_id, codebase_events, learning_mode)
+
         # 6. Decay weights（读 Space 配置，不再硬编码）
         await self._store.decay_weights(agent_id, decay_per_day, min_weight)
 
         return processed
+
+    async def _codebase_incremental(
+        self,
+        agent_id: str,
+        events: Sequence[PendingEvent],
+        learning_mode: str,
+    ) -> list[MemoryDecision]:
+        """消费 source=codebase 事件（V1.5b）。
+
+        与 chat/observation 分支的差异：
+        - 产物固定是 wiki 知识卡（不是 memory），由 IncrementalDistiller 直接写库；
+        - 每个事件独立成败：updated/skipped/deleted 消费掉，failed 走 P1-1 重试；
+        - 同时写 run 级审计（codebase_runs, mode=incremental），保持审计链不断。
+        """
+        from .codebase.incremental import IncrementalDistiller
+        from .codebase.store import CodebaseStore
+
+        distiller = IncrementalDistiller(self._s)
+        outcomes = await distiller.process(agent_id, list(events))
+
+        store = CodebaseStore(self._s)
+        run = await store.start_run(
+            agent_id=agent_id,
+            mode="incremental",
+            repo_path="(flush)",
+            commit_sha=next(
+                (
+                    (e.extra_meta or {}).get("commit_sha")
+                    for e in events
+                    if (e.extra_meta or {}).get("commit_sha")
+                ),
+                None,
+            ),
+            model=distiller.model,
+        )
+
+        decisions: list[MemoryDecision] = []
+        consumed_ids: list[str] = []
+        by_id = {e.id: e for e in events}
+
+        for out in outcomes:
+            action = (
+                DecisionAction.STORE if out.action == "updated"
+                else DecisionAction.FAILED if out.action == "failed"
+                else DecisionAction.DISCARD
+            )
+            event = by_id.get(out.event_id)
+            self._s.add(
+                LearningLog(
+                    agent_id=agent_id,
+                    session_id=event.session_id if event else None,
+                    source="codebase",
+                    event_type=f"module_changed:{out.action}",
+                    event_context=f"module={out.module} card={out.card_id or '-'}",
+                    decision_action=action.value,
+                    decision_target="wiki",
+                    analyzer_mode=learning_mode,
+                    llm_raw_response=out.raw_response or None,
+                    error_message=out.error,
+                )
+            )
+            run.tokens_used += out.tokens_used
+            if out.action == "updated":
+                run.cards_written += 1
+            elif out.action == "skipped_protected":
+                run.cards_skipped_protected += 1
+
+            if out.consumed:
+                consumed_ids.append(out.event_id)
+            decisions.append(
+                MemoryDecision(
+                    action=action,
+                    event_id=out.event_id,
+                    title=out.module,
+                    content=out.card_id or "",
+                    target="wiki",
+                )
+            )
+
+        if consumed_ids:
+            await self._s.execute(
+                delete(PendingEvent).where(PendingEvent.id.in_(consumed_ids))
+            )
+        # failed 事件保留 + retry_count 递增（P1-1 复用）
+        failed = [by_id[o.event_id] for o in outcomes if not o.consumed and o.event_id in by_id]
+        if failed:
+            await self._handle_undecided(failed, agent_id, None, learning_mode)
+
+        await store.finish_run(
+            run,
+            status="succeeded" if any(o.consumed for o in outcomes) or not outcomes else "failed",
+            error_message=next((o.error for o in outcomes if o.error), None),
+        )
+        return decisions
 
     # -- analysers -------------------------------------------------------
 

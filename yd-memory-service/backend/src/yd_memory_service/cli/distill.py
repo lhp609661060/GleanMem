@@ -12,6 +12,9 @@
 
     # 3. 只重建 md 投影（卡是事实源，md 可随时重建）
     uv run ydm-distill sync <repo> --url ... --key ... [--all]
+
+    # 4. 增量：把本地相对 --since 的变更推进收件箱（CI 提交后回调用）
+    uv run ydm-distill refresh <repo> --url ... --key ... --since HEAD~1
 """
 
 from __future__ import annotations
@@ -188,6 +191,82 @@ async def _sync(args: argparse.Namespace) -> int:
         return 0
 
 
+async def _refresh(args: argparse.Namespace) -> int:
+    """增量入站（V1.5b）：git diff 出变更文件 → 按模块聚合 → 推收件箱。
+
+    带上变更后的文件内容片段，因为服务端不读仓库（D11）。
+    """
+    from pathlib import Path
+
+    from yd_memory_service.core.codebase.scanner import (
+        DEFAULT_EXCLUDE_DIRS, SOURCE_SUFFIXES, fingerprint,
+    )
+
+    commit_sha = _git_sha(args.repo)
+    diff = subprocess.run(
+        ["git", "-C", args.repo, "diff", "--name-status", args.since, "HEAD"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if diff.returncode != 0:
+        print(f"git diff 失败：{diff.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    by_module: dict[str, dict] = {}
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status, rel = parts[0].strip(), parts[-1].strip()
+        path = Path(rel)
+        if any(p in DEFAULT_EXCLUDE_DIRS for p in path.parts[:-1]):
+            continue
+        if path.suffix not in SOURCE_SUFFIXES:
+            continue
+
+        module = str(path.parent) if str(path.parent) != "." else "(root)"
+        entry = by_module.setdefault(
+            module, {"module": module, "change": "modified", "files": []}
+        )
+        if status.startswith("D"):
+            # 文件删了：不带 snippet，指纹置空标记删除
+            entry["files"].append({"path": rel, "fingerprint": "deleted"})
+            continue
+        abs_path = Path(args.repo) / rel
+        try:
+            data = abs_path.read_bytes()
+        except OSError:
+            continue
+        snippet = data.decode("utf-8", errors="replace")
+        if len(snippet.encode("utf-8")) > 4000:  # 服务端 4KB 护栏
+            snippet = snippet[:3500] + "\n…（截断）"
+        entry["files"].append(
+            {"path": rel, "fingerprint": fingerprint(data), "snippet": snippet}
+        )
+
+    changes = [c for c in by_module.values() if c["files"]]
+    if not changes:
+        print(f"{args.since}..HEAD 无源码变更，无需 refresh。")
+        return 0
+
+    print(f"变更模块 {len(changes)} 个（commit {commit_sha}）：")
+    for c in changes:
+        print(f"  {c['module']:<50} {len(c['files'])} files")
+
+    headers = {"Authorization": f"Bearer {args.key}"}
+    async with httpx.AsyncClient(base_url=args.url, headers=headers, timeout=60) as http:
+        resp = await http.post(
+            "/api/v1/codebase/refresh",
+            json={"commit_sha": commit_sha, "changes": changes},
+        )
+        if resp.status_code != 200:
+            print(f"refresh 失败：{resp.status_code} {resp.text}", file=sys.stderr)
+            return 1
+        r = resp.json()
+        print(f"\n入站 ✓ 新增 {r['modules_accepted']}，重复 {r['modules_duplicate']}")
+        print("变更已进收件箱，下次 flush 时按模块重生成知识卡；之后运行 `ydm-distill sync` 更新 md。")
+        return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ydm-distill", description="codebase 蒸馏客户端")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -208,10 +287,16 @@ def main() -> None:
     add_remote(p_sync)
     p_sync.add_argument("--all", action="store_true", help="重建全部，而非仅 sync_pending")
 
+    p_refresh = sub.add_parser("refresh", help="增量：推 git 变更进收件箱（V1.5b）")
+    add_remote(p_refresh)
+    p_refresh.add_argument("--since", default="HEAD~1", help="diff 基线（默认 HEAD~1）")
+
     args = parser.parse_args()
     if args.cmd == "scan":
         sys.exit(cmd_scan(args))
     elif args.cmd == "run":
         sys.exit(asyncio.run(_run(args)))
+    elif args.cmd == "refresh":
+        sys.exit(asyncio.run(_refresh(args)))
     else:
         sys.exit(asyncio.run(_sync(args)))

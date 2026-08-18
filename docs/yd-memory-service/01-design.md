@@ -10,6 +10,8 @@
 >
 > **v3.1 修订记录**（按 07 评审落 5 条修正意见）：Week 1 拆三段（day 1-2 建表链路+入口+P0-3 / day 3-5 数据完整性+审计+pytest / day 6-7 v3 契约迁移+删 query_db）；P0-3 前置 zhparser 三环修复；V1.5 拆 V1.5a/V1.5b；差距清单补 N1/N2 等评审新发现；观察分析器契约 Week 1 末冻结。
 >
+> **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
+>
 > **v3.2 修订记录**（2026-08，V1 验收后、V1.5 开工前）：V1 全部 🔴/🟡 差距关闭（23 测试绿、P0-3 100%）；闭环 V1.5 的 5 个开工前设计点 —— 叙述层 md 定为知识卡的**单向投影**（D11）、新增 `codebase_runs` **run 级审计**表（D12）、新增独立 `/api/v1/codebase/*` 端点（D13）、CodebaseAnalyzer 模型与 token 硬预算（D14）。
 
 ## 决策记录（v2 → v3）
@@ -316,6 +318,12 @@ codebase 蒸馏是 v3 引入的**第一种 batch 型学习管线**，与既有 e
 - 指纹：文件内容哈希（V1.5 简化版；AST 签名与重命名识别 V2 再补）
 - diff 变更集 → 按模块聚合 → 只重生成受影响模块（对齐 Qoder 单次 ≤10k 行约束）
 - 触发：CI 提交后回调 push，或 cron 定时校验
+- **实现要点（V1.5b 已落地）**：
+  - 指纹比对以卡上 `metadata.fingerprints` 为基准，**无变化直接 skip，不花 token**；
+  - 服务端零仓库访问权 ⇒ 重生成只用事件里附带的 snippet（≤4KB/文件），不读磁盘；
+  - 每个事件独立成败：`updated` / `skipped_unchanged` / `skipped_protected` / `deleted` 消费出箱，`failed` 保留并递增 `retry_count`（复用 P1-1）；
+  - 决策级写 `learning_logs`（`event_type=module_changed:<action>`），run 级写 `codebase_runs`（`mode=incremental`），两层审计都不断；
+  - flush 的 source 分派必须是**白名单**（`in ("chat","example")`）——原 `!= "observation"` 会让 codebase 事件误入 chat 分支学成 memory。
 
 ### 人工修订保护（与增量捆绑发布，缺一不可）
 
@@ -432,7 +440,7 @@ GET  /api/v1/codebase/cards?sync_pending=true   # CLI sync 拉取投影
 ### 切片（V1.5a / V1.5b）
 
 - **V1.5a** ✅ 已完成：batch 全量 + `protected` + 双层产物 + 体积治理 + `codebase_runs` 审计 + `WikiStore.search` source 过滤
-- **V1.5b**：event 增量（指纹 diff + 模块聚合 + 单模块重生成 + md 投影 sync）（约 1-1.5 周）——入站口已通，待做 flush 侧 `source=codebase` 分派
+- **V1.5b** ✅ 已完成：指纹 diff + 模块聚合 + 单模块重生成 + flush 侧 `source=codebase` 分派 + `ydm-distill refresh`
 - **前置依赖**：V1 的 P0-3（zhparser 中文召回）验证通过 ✅；5 个开工前设计点已闭环（D11-D14）✅
 
 ---
@@ -628,7 +636,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 ### V1.5（候选主线，拆两片）
 
 - **V1.5a（约 1.5-2 周，可独立演示）**：batch 全量管线 + `protected` 修订保护 + 双层产物（叙述层 md + 知识卡进服务）+ 体积治理 + `codebase_runs` run 级审计。演示目标：小型真实仓库自动出 wiki、人改不被覆盖。✅ **已完成**（2026-08：`codebase_runs` 迁移 + scanner/analyzer/store/projection + `/api/v1/codebase/*` 5 端点 + `ydm-distill` CLI（scan/run/sync）+ `WikiStore.search` source 过滤；35 测试绿、端到端 10 步全通过）
-- **V1.5b（约 1-1.5 周）**：event 增量（文件指纹 diff + 模块聚合 + 单模块重生成 + md 投影 sync）。入站口 `POST /api/v1/codebase/refresh` 已在 V1.5a 开通并验证幂等；**待做**：flush 侧 `CodebaseAnalyzer` 的 `source=codebase` 分派 + 指纹 diff 比对 + 单模块重生成。
+- **V1.5b（约 1-1.5 周）**：event 增量（文件指纹 diff + 模块聚合 + 单模块重生成 + md 投影 sync）。✅ **已完成**（2026-08：`core/codebase/incremental.py` 指纹 diff + 单模块重生成 + flush 侧 `source=codebase` 分派 + `ydm-distill refresh`；45 测试绿、端到端 8 步全通过。**顺带修复一处真实 bug**：flush 的分派原为 `source != "observation"`，`source=codebase` 事件会误入 chat 分支被学成 long_term_memory，现改为白名单 `in ("chat","example")`，并有回归测试锁定）
 - **开工前 3 个设计点已闭环**（2026-08）：① md 是知识卡的单向投影、接受短期滞后（D11）；② `codebase_runs` run 级审计表（D12）；③ 独立 `/api/v1/codebase/*` 端点（D13）。另闭环模型与成本上限（D14）。
 - 样例学习降级为下游 pattern 归纳，视资源实施。
 

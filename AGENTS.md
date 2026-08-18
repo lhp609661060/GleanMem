@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repository contains the design, spike experiments, and backend implementation for **yd-memory-service**, a multi-agent external memory platform backed by PostgreSQL with Chinese full-text search. It integrates with Dify via MCP, with DSH/other agents and business systems via REST (per-space API Key). The authoritative design is `docs/yd-memory-service/01-design.md` (**v3.2**); its §实现现状与差距清单 tracks defects — V1 and V1.5a (codebase distillation, batch) are implemented and verified; V1.5b (event incremental) is the next phase.
+This repository contains the design, spike experiments, and backend implementation for **yd-memory-service**, a multi-agent external memory platform backed by PostgreSQL with Chinese full-text search. It integrates with Dify via MCP, with DSH/other agents and business systems via REST (per-space API Key). The authoritative design is `docs/yd-memory-service/01-design.md` (**v3.3**); its §实现现状与差距清单 tracks defects — V1, V1.5a (batch distillation) and V1.5b (event incremental) are implemented and verified; V2 items (pull producer, scheduler, pgvector, admin UI) are the remaining backlog.
 
 ## Project Structure & Module Organization
 
@@ -30,7 +30,7 @@ cd yd-memory-service/backend && uv run pytest
 cd yd-memory-service/backend && uv run ydm-distill scan <repo>   # codebase 蒸馏 dry-run（不调 LLM）
 ```
 
-`uv sync` installs dependencies, `alembic upgrade head` applies migrations, `yd-memory` starts the FastAPI app, and the health endpoint is `/health`. `ydm-distill` is the codebase-distillation client (`scan` reports file counts + token estimate before spending anything; `run` distills and uploads cards; `sync` rebuilds the md projection). End-to-end demos: `scripts/e2e_demo.py` (V1) and `scripts/e2e_codebase_demo.py` (V1.5a, no LLM key needed).
+`uv sync` installs dependencies, `alembic upgrade head` applies migrations, `yd-memory` starts the FastAPI app, and the health endpoint is `/health`. `ydm-distill` is the codebase-distillation client (`scan` reports file counts + token estimate before spending anything; `run` distills and uploads cards; `sync` rebuilds the md projection; `refresh` pushes git diffs into the inbox for incremental regeneration). End-to-end demos, none of which need an LLM key: `scripts/e2e_demo.py` (V1), `scripts/e2e_codebase_demo.py` (V1.5a batch), `scripts/e2e_incremental_demo.py` (V1.5b incremental).
 
 ## Coding Style & Naming Conventions
 

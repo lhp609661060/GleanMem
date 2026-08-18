@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repo contains design docs, spike experiments, and a first-cut backend implementation for **yd-memory-service**, a multi-agent external memory platform integrated to Dify (MCP), DSH/other agents (REST), and business systems (push). The referenced `yd-agent` codebase is frozen.
 
 - `docs/yd-memory-service/01-design.md` is the **authoritative design (v3 rewrite)** — read it before touching code.
-- `yd-memory-service/backend/` holds ~4.7k lines of FastAPI/Python (src + tests) implementing V1 complete plus V1.5a codebase distillation (v3.2 contract, 35 tests green). The gap list in `01-design.md` §实现现状与差距清单 is fully closed except N6 (`review_status` recall filtering, due with V1.5 pattern) and the seed.py/Alembic dual-track item (🟢).
+- `yd-memory-service/backend/` implements V1 + V1.5a (batch codebase distillation) + V1.5b (event incremental) — v3.3 contract, 45 tests green. The gap list in `01-design.md` §实现现状与差距清单 is fully closed except N6 (`review_status` recall filtering) and the seed.py/Alembic dual-track item (🟢). Remaining work is V2 backlog.
 - `spike/` holds disposable Dify/MCP verification scripts + `SPIKE-REPORT.md` (Spike passed).
 - It is a git repo (branch `main`, Conventional Commits; see `AGENTS.md` for commit/tag conventions). Dev commands (uv, docker compose, alembic, pytest) are documented in `AGENTS.md`.
 
