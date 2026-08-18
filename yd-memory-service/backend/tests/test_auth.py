@@ -56,3 +56,65 @@ async def test_flush_identity_from_key_not_body(space_client):
         )
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+
+# -- Space 端点鉴权与密钥哈希不外泄（前端接入时发现的缺陷）------------------
+
+async def test_space_endpoints_require_auth(space_client):
+    """原实现 GET/PUT/DELETE /spaces 完全无鉴权：可枚举全部 Space、可改他人配置。"""
+    _, agent_id = await space_client()
+    async with _client() as client:
+        assert (await client.get("/api/v1/spaces")).status_code == 401
+        assert (await client.get(f"/api/v1/spaces/{agent_id}")).status_code == 401
+        assert (await client.put(f"/api/v1/spaces/{agent_id}?name=hacked")).status_code == 401
+        assert (await client.delete(f"/api/v1/spaces/{agent_id}")).status_code == 401
+
+
+async def test_space_response_never_leaks_key_hash(space_client):
+    """api_key_hash 是 space_key 的 SHA-256，绝不能出现在响应里。"""
+    key, agent_id = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as client:
+        listed = (await client.get("/api/v1/spaces")).json()
+        one = (await client.get(f"/api/v1/spaces/{agent_id}")).json()
+
+    assert len(listed) == 1 and listed[0]["agent_id"] == agent_id
+    for payload in (listed[0], one):
+        assert "api_key_hash" not in payload
+        assert "api_key_prefix" in payload  # 前缀可见（UI 辨认用）
+
+
+async def test_space_list_scoped_to_own_key(space_client):
+    """列表只返回自己的 Space，不枚举他人。"""
+    key_a, agent_a = await space_client()
+    key_b, agent_b = await space_client()
+
+    async with _client({"Authorization": f"Bearer {key_a}"}) as ca:
+        ids = [s["agent_id"] for s in (await ca.get("/api/v1/spaces")).json()]
+        assert ids == [agent_a]
+        assert agent_b not in ids
+        # 直接按 id 取他人 Space → 404（不泄露存在性）
+        assert (await ca.get(f"/api/v1/spaces/{agent_b}")).status_code == 404
+
+
+async def test_cross_space_mutation_blocked(space_client):
+    """A 不能改/归档 B 的 Space。"""
+    key_a, _ = await space_client()
+    key_b, agent_b = await space_client()
+
+    async with _client({"Authorization": f"Bearer {key_a}"}) as ca:
+        assert (await ca.put(f"/api/v1/spaces/{agent_b}?name=hacked")).status_code == 404
+        assert (await ca.delete(f"/api/v1/spaces/{agent_b}")).status_code == 404
+
+    async with _client({"Authorization": f"Bearer {key_b}"}) as cb:
+        assert (await cb.get(f"/api/v1/spaces/{agent_b}")).json()["name"] != "hacked"
+
+
+async def test_own_space_update_persists(space_client):
+    """自己的 Space 可改，且改动真落库（原实现只 flush 未 commit）。"""
+    key, agent_id = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as client:
+        r = await client.put(f"/api/v1/spaces/{agent_id}?name=renamed")
+        assert r.status_code == 200
+        assert r.json()["name"] == "renamed"
+        # 重新读取确认持久化
+        assert (await client.get(f"/api/v1/spaces/{agent_id}")).json()["name"] == "renamed"
