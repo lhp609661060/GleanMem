@@ -1,0 +1,529 @@
+"""LearningModel — deferred async learning pipeline.
+
+Three modes:
+- llm:        LLM analyses pending events, returns decisions as JSON.
+- heuristic:  Rule-based: every memorize → store; dedupe by title_key.
+- direct:     memorize → store directly (Agent already judged).
+
+Flush runs under PG advisory lock keyed by agent_id.
+Every decision writes a learning_logs row (including raw LLM output).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from dataclasses import dataclass
+from typing import Sequence
+
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from yd_memory_service.config import settings
+
+from .long_term.pg_store import LongTermStore
+from .models.learning_log import LearningLog
+from .models.long_term_memory import LongTermMemory
+from .models.pending_event import PendingEvent
+from .models.wiki_document import WikiDocument
+from .types import DecisionAction, EventType, LearningMode, MemoryType
+from .wiki.db_store import WikiStore
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MemoryDecision:
+    action: DecisionAction
+    event_id: str
+    title: str = ""
+    content: str = ""
+    memory_type: MemoryType = MemoryType.REFERENCE
+    merge_with_id: str | None = None
+    tags: list[str] | None = None
+    metadata: dict | None = None
+    target: str = "memory"  # memory | wiki（观察蒸馏产物映射）
+    description: str = ""  # target=wiki 必填，≤100 字
+    evidence: list[str] | None = None  # 溯源 event 引用（防幻觉：观察归纳必须非空）
+    raw_response: str | None = None  # LLM 原始输出（审计落库）
+
+
+class LearningModel:
+    def __init__(self, session: AsyncSession):
+        self._s = session
+        self._store = LongTermStore(session)
+        self._wiki = WikiStore(session)
+
+    @staticmethod
+    def _title_key(title: str) -> str:
+        """Normalise a title for dedupe comparison."""
+        return re.sub(r"\s+", "", title.lower())
+
+    # ------------------------------------------------------------------
+
+    async def run_pipeline(
+        self,
+        agent_id: str,
+        learning_mode: str,
+        decay_per_day: float = 0.95,
+        min_weight: float = 0.1,
+    ) -> list[MemoryDecision] | None:
+        """Flush pipeline: acquire lock → fetch events → analyse → commit → log.
+
+        Returns None when another flush for the same agent_id holds the lock
+        (caller should surface this as a "skipped" status).
+        """
+
+        # 1. Acquire advisory lock (non-blocking)
+        lock_key = f"flush_{agent_id}"
+        result = await self._s.execute(
+            text("SELECT pg_try_advisory_lock(hashtext(:key))"),
+            {"key": lock_key},
+        )
+        if not result.scalar():
+            logger.info("Flush for %s already running, skip", agent_id)
+            return None
+
+        try:
+            return await self._run(agent_id, learning_mode, decay_per_day, min_weight)
+        finally:
+            await self._s.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:key))"),
+                {"key": lock_key},
+            )
+
+    async def _run(
+        self,
+        agent_id: str,
+        learning_mode: str,
+        decay_per_day: float,
+        min_weight: float,
+    ) -> list[MemoryDecision]:
+        # 2. SELECT … FOR UPDATE
+        stmt = (
+            select(PendingEvent)
+            .where(PendingEvent.agent_id == agent_id)
+            .order_by(PendingEvent.created_at)
+            .with_for_update()
+        )
+        result = await self._s.execute(stmt)
+        events = result.scalars().all()
+
+        if not events:
+            return []
+
+        # 3-5. 按 source 分派分析并处理
+        chat_events = [e for e in events if e.source != "observation"]
+        obs_events = [e for e in events if e.source == "observation"]
+        processed: list[MemoryDecision] = []
+        chat_raw: str | None = None
+        obs_raw: str | None = None
+
+        # chat 分支：决策与事件 1:1 绑定
+        if chat_events:
+            if learning_mode == LearningMode.DIRECT:
+                ds = self._direct_analyze(chat_events)
+            elif learning_mode == LearningMode.LLM:
+                ds, chat_raw = await self._llm_analyze(chat_events)
+            else:  # heuristic
+                ds = await self._heuristic_analyze(chat_events, agent_id)
+
+            if not ds:
+                # P1-1：无决策时事件不得删除
+                await self._handle_undecided(chat_events, agent_id, chat_raw, learning_mode)
+            else:
+                evt_map = {e.id: e.event_type for e in chat_events}
+                decided_ids: set[str] = set()
+                for d in ds:
+                    await self._commit_and_log(
+                        d, agent_id, evt_map.get(d.event_id, ""),
+                        chat_events[0].session_id, learning_mode,
+                        d.raw_response or chat_raw, "chat",
+                    )
+                    if d.event_id:
+                        decided_ids.add(d.event_id)
+                if decided_ids:
+                    await self._s.execute(
+                        delete(PendingEvent).where(PendingEvent.id.in_(decided_ids))
+                    )
+                undecided = [e for e in chat_events if e.id not in decided_ids]
+                if undecided:
+                    await self._handle_undecided(undecided, agent_id, chat_raw, learning_mode)
+            processed += ds
+
+        # observation 分支：归纳决策与事件批绑定（evidence 引用），成功即整批删除
+        if obs_events:
+            if learning_mode == LearningMode.LLM:
+                ds, obs_raw = await self._observation_analyze_llm(obs_events)
+            else:
+                ds = await self._observation_analyze_rule(obs_events)
+
+            if not ds:
+                await self._handle_undecided(obs_events, agent_id, obs_raw, learning_mode)
+            else:
+                for d in ds:
+                    await self._commit_and_log(
+                        d, agent_id, "observation", obs_events[0].session_id,
+                        learning_mode, d.raw_response or obs_raw, "observation",
+                    )
+                obs_ids = [e.id for e in obs_events]
+                await self._s.execute(
+                    delete(PendingEvent).where(PendingEvent.id.in_(obs_ids))
+                )
+            processed += ds
+
+        # 6. Decay weights（读 Space 配置，不再硬编码）
+        await self._store.decay_weights(agent_id, decay_per_day, min_weight)
+
+        return processed
+
+    # -- analysers -------------------------------------------------------
+
+    def _direct_analyze(self, events: Sequence[PendingEvent]) -> list[MemoryDecision]:
+        return [
+            MemoryDecision(
+                action=DecisionAction.STORE,
+                event_id=e.id,
+                title=e.context[:200],
+                content=e.context,
+                memory_type=MemoryType.FEEDBACK
+                if e.event_type == EventType.USER_FEEDBACK
+                else MemoryType.REFERENCE,
+            )
+            for e in events
+        ]
+
+    async def _heuristic_analyze(
+        self, events: Sequence[PendingEvent], agent_id: str
+    ) -> list[MemoryDecision]:
+        decisions: list[MemoryDecision] = []
+        for e in events:
+            if e.event_type == EventType.USER_FEEDBACK:
+                decisions.append(
+                    MemoryDecision(
+                        action=DecisionAction.STORE,
+                        event_id=e.id,
+                        title=e.context[:200],
+                        content=e.context,
+                        memory_type=MemoryType.FEEDBACK,
+                    )
+                )
+            else:
+                decisions.append(
+                    MemoryDecision(
+                        action=DecisionAction.STORE,
+                        event_id=e.id,
+                        title=e.context[:200],
+                        content=e.context,
+                        memory_type=MemoryType.REFERENCE,
+                    )
+                )
+        return decisions
+
+    async def _llm_analyze(
+        self, events: Sequence[PendingEvent]
+    ) -> tuple[list[MemoryDecision], str]:
+        """Call LLM to classify events.
+
+        Returns (decisions, raw_response)。失败或空结果返回 ([], raw)，
+        由 _run 的 P1-1 重试机制处理——绝不静默丢弃事件。
+        """
+        if not settings.llm_api_key:
+            logger.warning("No LLM API key configured; events will be retried")
+            return [], ""
+
+        import openai  # late import
+
+        client = openai.AsyncOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_api_base,
+        )
+
+        events_text = "\n".join(
+            f"- [{e.event_type}] {e.context[:300]}" for e in events
+        )
+
+        raw = ""
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a memory analysis assistant. For each event, "
+                            "decide: store (long-term memory), discard (not useful), "
+                            "or merge (similar to existing). Return JSON array:\n"
+                            '[{"action":"store|discard|merge","title":"...","content":"...","memory_type":"reference|feedback|project|user"}]'
+                        ),
+                    },
+                    {"role": "user", "content": events_text},
+                ],
+                temperature=0.1,
+                max_tokens=1000,
+            )
+            raw = resp.choices[0].message.content or ""
+        except Exception:
+            logger.exception("LLM analysis failed; keeping events for retry")
+            return [], raw
+
+        parsed = self._parse_llm_json(raw)
+        decisions: list[MemoryDecision] = []
+        for i, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                continue
+            try:
+                action = DecisionAction(item.get("action", "store"))
+            except ValueError:
+                action = DecisionAction.STORE
+            try:
+                memory_type = MemoryType(item.get("memory_type", "reference"))
+            except ValueError:
+                memory_type = MemoryType.REFERENCE
+            event = events[i] if i < len(events) else None
+            decisions.append(
+                MemoryDecision(
+                    action=action,
+                    event_id=event.id if event else "",
+                    title=item.get("title") or (event.context[:200] if event else ""),
+                    content=item.get("content") or (event.context if event else ""),
+                    memory_type=memory_type,
+                    raw_response=raw,
+                )
+            )
+        return decisions, raw
+
+    @staticmethod
+    def _parse_llm_json(raw: str) -> list:
+        """Strip ```json fences and parse; non-list → []."""
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```").strip()
+            if text.endswith("```"):
+                text = text[:-3].strip()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    # -- observation analysers（契约见 01-design §c 观察分析器契约）--------
+
+    async def _observation_analyze_rule(
+        self, events: Sequence[PendingEvent]
+    ) -> list[MemoryDecision]:
+        """heuristic/direct：观察事件不做归纳，直接存 reference 记忆并固化溯源。"""
+        decisions: list[MemoryDecision] = []
+        for e in events:
+            try:
+                payload = json.loads(e.context)
+            except Exception:
+                payload = {}
+            entity = payload.get("entity", "unknown")
+            evidence = [e.dedup_key] if e.dedup_key else []
+            decisions.append(
+                MemoryDecision(
+                    action=DecisionAction.STORE,
+                    event_id=e.id,
+                    title=f"{entity} {e.event_type}"[:200],
+                    content=e.context,
+                    memory_type=MemoryType.REFERENCE,
+                    metadata={
+                        "source": "observation",
+                        "origin": entity,
+                        "evidence": evidence,
+                    },
+                )
+            )
+        return decisions
+
+    async def _observation_analyze_llm(
+        self, events: Sequence[PendingEvent]
+    ) -> tuple[list[MemoryDecision], str]:
+        """llm：按冻结契约归纳业务规律；无引用即拒绝；失败交 P1-1 重试。"""
+        if not settings.llm_api_key:
+            logger.warning("No LLM API key configured; observation events will be retried")
+            return [], ""
+
+        import openai  # late import
+
+        client = openai.AsyncOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_api_base,
+        )
+
+        events_payload = []
+        for e in events:
+            try:
+                events_payload.append(json.loads(e.context))
+            except Exception:
+                events_payload.append({"raw": e.context})
+        events_text = json.dumps(events_payload, ensure_ascii=False)
+
+        raw = ""
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是业务观察分析助手。输入是业务系统推来的观察事件列表。"
+                            "归纳稳定可复用的业务规则：1) 单事件即明确规则（如状态流转定义）直接 store；"
+                            "2) 多条同实体事件呈现稳定模式 → 归纳成一条；3) 一次性噪音事件 → discard。"
+                            "返回 JSON 数组：[{\"action\":\"store|discard\",\"title\":\"≤40字\","
+                            "\"content\":\"完整规则描述\",\"memory_type\":\"reference|feedback\","
+                            "\"target\":\"memory|wiki\",\"description\":\"target=wiki 时必填 ≤100字\","
+                            "\"evidence\":[\"event_id\",...]}]"
+                        ),
+                    },
+                    {"role": "user", "content": events_text},
+                ],
+                temperature=0.1,
+                max_tokens=1000,
+            )
+            raw = resp.choices[0].message.content or ""
+        except Exception:
+            logger.exception("Observation LLM analysis failed; keeping events for retry")
+            return [], raw
+
+        parsed = self._parse_llm_json(raw)
+        decisions: list[MemoryDecision] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                action = DecisionAction(item.get("action", "store"))
+            except ValueError:
+                action = DecisionAction.STORE
+            try:
+                memory_type = MemoryType(item.get("memory_type", "reference"))
+            except ValueError:
+                memory_type = MemoryType.REFERENCE
+            evidence = item.get("evidence") or []
+            if action == DecisionAction.STORE and not evidence:
+                # 防幻觉：无引用即拒绝（同 pattern 纪律）
+                action = DecisionAction.DISCARD
+            decisions.append(
+                MemoryDecision(
+                    action=action,
+                    event_id="",  # 归纳决策与事件批绑定，由 _run 整批删除
+                    title=(item.get("title") or "")[:200],
+                    content=item.get("content") or "",
+                    memory_type=memory_type,
+                    target=item.get("target", "memory"),
+                    description=(item.get("description") or "")[:100],
+                    evidence=evidence,
+                    raw_response=raw,
+                )
+            )
+        return decisions, raw
+
+    async def _handle_undecided(
+        self,
+        events: Sequence[PendingEvent],
+        agent_id: str,
+        raw: str | None,
+        learning_mode: str,
+    ) -> None:
+        """P1-1：无决策的事件保留并累加 retry_count；≥3 次写 failed 日志后移除。"""
+        for e in events:
+            e.retry_count = (e.retry_count or 0) + 1
+            if e.retry_count >= 3:
+                self._s.add(
+                    LearningLog(
+                        agent_id=agent_id,
+                        session_id=e.session_id,
+                        source=e.source,
+                        event_type=e.event_type,
+                        event_context=e.context[:500],
+                        decision_action=DecisionAction.FAILED.value,
+                        decision_target="long_term",
+                        analyzer_mode=learning_mode,
+                        error_message="analysis returned no decision after retries",
+                        llm_raw_response=raw,
+                    )
+                )
+                await self._s.delete(e)
+
+    # -- commit + log ----------------------------------------------------
+
+    async def _commit_and_log(
+        self,
+        d: MemoryDecision,
+        agent_id: str,
+        event_type: str,
+        session_id: str | None,
+        learning_mode: str,
+        llm_raw_response: str | None = None,
+        source: str = "chat",
+    ) -> None:
+        memory_id: str | None = None
+        error_msg: str | None = None
+        decision_target = "long_term"
+
+        try:
+            if d.action == DecisionAction.STORE:
+                if d.target == "wiki":
+                    # 观察蒸馏 → wiki 产物（Skill 机制：description 是检索命脉）
+                    doc = WikiDocument(
+                        id=f"obs-{uuid.uuid4().hex[:8]}",
+                        agent_id=agent_id,
+                        title=d.title or "观察知识",
+                        description=(d.description or d.title or "")[:100],
+                        content=d.content,
+                        tags=[],
+                        extra_meta={"source": "observation", "evidence": d.evidence or []},
+                    )
+                    await self._wiki.create(doc)
+                    decision_target = "wiki"
+                else:
+                    # dedupe check
+                    tk = self._title_key(d.title)
+                    existing = await self._store.search(tk, agent_id, top_k=3)
+                    for mem in existing:
+                        if self._title_key(mem.title) == tk:
+                            d.action = DecisionAction.MERGE
+                            d.merge_with_id = mem.id
+                            break
+
+            if d.action in (DecisionAction.STORE, DecisionAction.MERGE) and d.target != "wiki":
+                if d.merge_with_id:
+                    existing = await self._store.get(d.merge_with_id)
+                    if existing:
+                        existing.content = existing.content + "\n---\n" + d.content
+                        await self._store.update(existing)
+                        memory_id = existing.id
+                else:
+                    mem = LongTermMemory(
+                        agent_id=agent_id,
+                        type=d.memory_type.value,
+                        title=d.title,
+                        content=d.content,
+                        weight=1.0,
+                        extra_meta=d.metadata or {},
+                    )
+                    await self._store.create(mem)
+                    memory_id = mem.id
+        except Exception as exc:
+            d.action = DecisionAction.FAILED
+            error_msg = str(exc)
+            logger.exception("Commit failed for event %s", d.event_id)
+
+        # always log
+        log = LearningLog(
+            agent_id=agent_id,
+            session_id=session_id,
+            source=source,
+            event_type=event_type,
+            event_context=d.content[:500],
+            decision_action=d.action.value,
+            decision_target=decision_target,
+            memory_id=memory_id,
+            llm_raw_response=llm_raw_response or None,
+            analyzer_mode=learning_mode,
+            error_message=error_msg,
+        )
+        self._s.add(log)

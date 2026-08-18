@@ -1,0 +1,193 @@
+# yd-memory-service Dify Workflow 模板（v3.1）
+# 导入方式: Dify 后台 → 工作室 → 导入 DSL
+#
+# 导入后需要修改:
+#   1. Agent 节点 → 系统提示词 → 改业务描述
+#   2. Agent 节点 → 工具 → 绑定你的 MCP Server（X-Agent-ID 填本 Space 的 agent_id）
+#   3. Flush 节点 → URL → 改成你的 memory-service 地址
+#   4. Flush 节点 → Headers → 把 ydm_REPLACE_WITH_SPACE_KEY 换成你的 space_key
+#      （身份由 Bearer key 解析，Body 只带 session_id，不再传 agent_id）
+
+app:
+  description: "yd-memory-service 记忆增强 Agent 模板。Agent 自动调用 recall 检索历史记忆，调用 memorize 提交新规则。对话结束自动 flush 学习管道。"
+  icon: "🧠"
+  icon_background: "#1C64F2"
+  mode: advanced-chat
+  name: "yd-memory-agent"
+  use_icon_as_answer_icon: false
+
+kind: app
+version: 0.4.0
+
+workflow:
+  conversation_variables:
+    - id: cv_memory_flushed
+      name: memory_flushed
+      value_type: string
+      value: ""
+      description: 标记 flush 是否已执行
+
+  environment_variables: []
+
+  features:
+    file_upload:
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+          - local_file
+          - remote_url
+    opening_statement: "我是你的业务助手，拥有长期记忆能力。我会记住你告诉我的规则和偏好。"
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    text_to_speech:
+      enabled: false
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+
+  graph:
+    edges:
+      # Start → Agent
+      - data:
+          isInLoop: false
+          sourceType: start
+          targetType: agent
+        id: start-agent
+        source: start
+        sourceHandle: source
+        target: agent
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      # Agent → Flush
+      - data:
+          isInLoop: false
+          sourceType: agent
+          targetType: http-request
+        id: agent-flush
+        source: agent
+        sourceHandle: source
+        target: flush
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      # Flush → End
+      - data:
+          isInLoop: false
+          sourceType: http-request
+          targetType: end
+        id: flush-end
+        source: flush
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+    nodes:
+      # === Start ===
+      - data:
+          type: start
+          title: 开始
+          variables: []
+        height: 54
+        id: start
+        position:
+          x: 80
+          y: 150
+        type: custom
+        width: 244
+
+      # === Agent (核心) ===
+      - data:
+          type: agent
+          title: Agent (记忆增强)
+          desc: ""
+          selected: false
+          provider_id: langgenius/openai/openai
+          provider_name: langgenius/openai/openai
+          provider_type: builtin
+          model:
+            mode: chat
+            name: gpt-4o-mini
+            provider: langgenius/openai/openai
+            completion_params: {}
+          agent_strategy_enabled: false
+          tool_configurations:
+            # ← 导入后在这里绑定 MCP 工具: recall / load_memory / memorize
+            {}
+          instructions: |
+            【角色】
+            你是业务助手，拥有长期记忆系统。
+
+            【记忆系统使用规则】
+            1. 回答业务问题前，必须先调用 recall 检索相关历史记忆和规则
+            2. 需要查看记忆全文时，调用 load_memory
+            3. 用户明确告知新规则、纠正错误信息、或你判断信息有长期价值时，调用 memorize 提交
+               - type=user_feedback: 用户显式告知/纠正
+               - type=agent_mark: 你自己判断有价值
+            4. memorize 提交后不会立即生效，对话结束后统一处理
+            5. 简单问候和闲聊不需要调工具
+
+            【业务描述】← 这里改成你自己的业务内容
+            你是发货助手，帮助用户处理发货相关的业务。
+        height: 98
+        id: agent
+        position:
+          x: 400
+          y: 150
+        type: custom
+        width: 244
+
+      # === Flush (HTTP 请求) ===
+      - data:
+          type: http-request
+          title: Flush 学习管道
+          desc: "对话结束后触发记忆学习（身份由 Bearer key 解析）"
+          method: post
+          url: "http://localhost:8000/api/v1/learning/flush"
+          authorization:
+            type: no-auth
+          headers: "Content-Type: application/json\nAuthorization: Bearer ydm_REPLACE_WITH_SPACE_KEY"
+          params: ""
+          body:
+            type: json
+            data: |
+              {
+                "session_id": "{{#sys.conversation_id#}}"
+              }
+          timeout:
+            max_connect_timeout: 0
+            max_read_timeout: 0
+            max_write_timeout: 0
+        height: 98
+        id: flush
+        position:
+          x: 720
+          y: 150
+        type: custom
+        width: 244
+
+      # === End ===
+      - data:
+          type: end
+          title: 结束
+          outputs:
+            - value_selector:
+                - agent
+                - text
+              variable: output
+        height: 54
+        id: end
+        position:
+          x: 1040
+          y: 150
+        type: custom
+        width: 244

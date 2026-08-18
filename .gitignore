@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 环境变量与密钥（space_key 只存数据库，本地 .env 绝不入库）
+.env
+.env.*
+
+# 系统 / 编辑器
+.DS_Store
+
+# 本地 IDE 设置
+.claude/settings.local.json
+
+# 前端（V1.5 后启用）
+node_modules/
+dist/
+build/
+
+# 日志与临时文件
+*.log

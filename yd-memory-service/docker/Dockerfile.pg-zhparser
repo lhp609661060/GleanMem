@@ -1,0 +1,31 @@
+# PostgreSQL 14 + zhparser（中文分词）。
+# 选 14 的原因：zhparser/scws 均为停维护项目，PG15+ 编译兼容问题多；
+# PG14 是久经验证的组合，且满足设计「PostgreSQL 14+」约束。
+# 构建上下文必须是 yd-memory-service/（compose 里已如此配置）：
+#   docker build -f docker/Dockerfile.pg-zhparser -t ydm-postgres-zhparser:14 .
+FROM postgres:14-alpine
+
+# 1) scws —— 中文分词库（zhparser 的硬依赖，autotools 工程需 autoreconf 生成 configure）
+# 2) zhparser —— PostgreSQL 中文全文检索扩展
+# GitHub 直连不通的环境走 codeload tarball（tag/tarball URL 已验证可用）
+RUN set -ex \
+    && apk add --no-cache --virtual .build-deps \
+        build-base postgresql-dev autoconf automake libtool curl \
+    && curl -fsSL -o /tmp/scws.tar.gz https://codeload.github.com/hightman/scws/tar.gz/refs/tags/1.2.3 \
+    && tar -xzf /tmp/scws.tar.gz -C /tmp \
+    && cd /tmp/scws-1.2.3 \
+    && autoreconf -i \
+    && ./configure --prefix=/usr/local \
+    && make \
+    && make install \
+    && cd /tmp \
+    && curl -fsSL -o /tmp/zhparser.tar.gz https://codeload.github.com/amutu/zhparser/tar.gz/refs/heads/master \
+    && tar -xzf /tmp/zhparser.tar.gz -C /tmp \
+    && cd /tmp/zhparser-master \
+    && make with_llvm=no \
+    && make with_llvm=no install \
+    && apk del .build-deps \
+    && rm -rf /tmp/scws-1.2.3 /tmp/zhparser-master /tmp/*.tar.gz
+
+# 首次初始化时创建 pg_trgm/zhparser 扩展与文本搜索配置
+COPY backend/init-db.sql /docker-entrypoint-initdb.d/init.sql
