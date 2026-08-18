@@ -412,6 +412,22 @@ GET  /api/v1/codebase/cards?sync_pending=true   # CLI sync 拉取投影
 - 按模块分页；知识卡 description 生成策略：模块职责一句话，≤100 字（对齐 Skill 机制约束）
 - 成本参考：4000 文件仓库全量 ≈ 120 分钟（Qoder 官方参考值），实际以仓库规模为准
 
+### 真实蒸馏实测（2026-08，deepseek-chat）
+
+用 `scripts/verify_real_distill.py` 蒸馏本项目自身源码（`src/yd_memory_service`，10 个模块 / 44 个文件 / 137KB）：
+
+| 指标 | 实测值 | 说明 |
+|------|--------|------|
+| 成功率 | **10/10** | 无解析失败、无 description 缺失 |
+| 耗时 | **20s**（并发 4） | 单模块独立调用的并发设计有效 |
+| token | **40,482**（预估 46,634） | 估算系数 `BYTES_PER_TOKEN=3` 偏保守 15%，作为预算护栏是安全方向 |
+| description 长度 | min 44 / avg 76 / max 100 字 | 未触发截断上限即自然收敛，≤100 字约束不伤表达 |
+| **中文召回（Top3）** | **10/10 = 100%** | 阈值 ≥40%，远超。首轮为 9/10，唯一 miss 源于评估脚本把期望值写死成单模块（"中文全文检索"在 `core/long_term` 与 `core/wiki` 都有实现，命中后者同样正确）；期望值改为集合后 100%，产出本身无缺陷 |
+
+**结论**：07 评审 §5.3 担心的「模块一句话 ≤100 字撑不起跨模块检索」这一**已知张力实测不成立**——LLM 生成的 description 自带关键概念词（如「tsvector+zhparser」「Bearer space_key」），tsvector 匹配效果好。V1.5 的 description 策略保持不变，不需要引入多路召回兜底。
+
+单仓全量成本外推：40k token / 44 文件 ≈ 每文件 0.9k token，4000 文件规模约 3.6M token——这正是 `codebase_token_budget`（默认 300k）存在的理由，大仓需显式调高并分批。
+
 ### 溯源（维持不变式）
 
 `metadata` 固化：文件路径、commit SHA、指纹、生成时间——保持「每条知识可 trace 回代码」。
