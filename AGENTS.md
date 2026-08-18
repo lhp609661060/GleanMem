@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repository contains the design, spike experiments, and backend implementation for **yd-memory-service**, a multi-agent external memory platform backed by PostgreSQL with Chinese full-text search. It integrates with Dify via MCP, with DSH/other agents and business systems via REST (per-space API Key). The authoritative design is `docs/yd-memory-service/01-design.md` (**v3.3**); its §实现现状与差距清单 tracks defects — V1, V1.5a (batch distillation) and V1.5b (event incremental) are implemented and verified; V2 items (pull producer, scheduler, pgvector, admin UI) are the remaining backlog.
+This repository contains the design, spike experiments, and backend implementation for **yd-memory-service**, a multi-agent external memory platform backed by PostgreSQL with Chinese full-text search. It integrates with Dify via MCP, with DSH/other agents and business systems via REST (per-space API Key). The authoritative design is `docs/yd-memory-service/01-design.md` (**v3.4**); its §实现现状与差距清单 tracks defects — V1, V1.5a (batch distillation), V1.5b (event incremental) and N6 (review_status recall filtering) are implemented and verified, closing every 🔴/🟡. V2 items (pull producer, scheduler, pgvector, admin UI) are the remaining backlog.
 
 ## Project Structure & Module Organization
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yd_memory_service.core.database import get_db
 from yd_memory_service.core.models.long_term_memory import LongTermMemory
+from yd_memory_service.core.types import MODERATED_TYPES, ReviewStatus
 
 from .deps import require_agent
 
@@ -42,8 +44,63 @@ async def list_memories(
             "type": m.type,
             "weight": round(m.weight, 2),
             "review_status": m.review_status,
+            "recallable": m.review_status == ReviewStatus.APPROVED
+            or (
+                m.type not in MODERATED_TYPES
+                and m.review_status == ReviewStatus.PENDING
+            ),
             "metadata": m.extra_meta,
             "summary": m.content[:300],
         }
         for m in rows
     ]
+
+
+class ReviewIn(BaseModel):
+    status: str  # approved | flagged | pending
+
+
+@router.post("/{memory_id}/review")
+async def review_memory(
+    memory_id: str,
+    body: ReviewIn,
+    agent_id: str = Depends(require_agent),
+    db: AsyncSession = Depends(get_db),
+):
+    """人工审核（N6）：pattern 类记忆必须 approved 才进入召回。
+
+    归属校验按 agent_id，不能审别的 Space 的记忆。
+    """
+    allowed = {
+        ReviewStatus.APPROVED.value,
+        ReviewStatus.FLAGGED.value,
+        ReviewStatus.PENDING.value,
+    }
+    if body.status not in allowed:
+        raise HTTPException(
+            status_code=422, detail=f"status 只能是 {sorted(allowed)}"
+        )
+
+    result = await db.execute(
+        select(LongTermMemory).where(
+            LongTermMemory.id == memory_id,
+            LongTermMemory.agent_id == agent_id,
+            LongTermMemory.is_deleted == False,
+        )
+    )
+    mem = result.scalar_one_or_none()
+    if mem is None:
+        raise HTTPException(status_code=404, detail="记忆不存在或不属于当前 Space")
+
+    mem.review_status = body.status
+    await db.commit()
+    return {
+        "id": mem.id,
+        "type": mem.type,
+        "review_status": mem.review_status,
+        "recallable": mem.review_status == ReviewStatus.APPROVED
+        or (
+            mem.type not in MODERATED_TYPES
+            and mem.review_status == ReviewStatus.PENDING
+        ),
+    }

@@ -583,7 +583,11 @@ class LearningModel:
                 else:
                     # dedupe check
                     tk = self._title_key(d.title)
-                    existing = await self._store.search(tk, agent_id, top_k=3)
+                    # 去重比对必须看见 pending/flagged 记忆——这不是召回，
+                    # 施加审核过滤会让同名 pending 记忆重复入库（N6 修复的边界）
+                    existing = await self._store.search(
+                        tk, agent_id, top_k=3, apply_review_filter=False
+                    )
                     for mem in existing:
                         if self._title_key(mem.title) == tk:
                             d.action = DecisionAction.MERGE

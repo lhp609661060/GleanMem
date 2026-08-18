@@ -10,6 +10,8 @@
 >
 > **v3.1 修订记录**（按 07 评审落 5 条修正意见）：Week 1 拆三段（day 1-2 建表链路+入口+P0-3 / day 3-5 数据完整性+审计+pytest / day 6-7 v3 契约迁移+删 query_db）；P0-3 前置 zhparser 三环修复；V1.5 拆 V1.5a/V1.5b；差距清单补 N1/N2 等评审新发现；观察分析器契约 Week 1 末冻结。
 >
+> **v3.4 修订记录**（2026-08）：N6 关闭——召回层落地 `review_status` 分级过滤（pattern 必须 approved、flagged/deprecated 全类型排除），补审核端点。**差距清单全部 🔴/🟡 已关闭**，剩余仅 🟢 seed.py 双轨与 V2 backlog。
+>
 > **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
 >
 > **v3.2 修订记录**（2026-08，V1 验收后、V1.5 开工前）：V1 全部 🔴/🟡 差距关闭（23 测试绿、P0-3 100%）；闭环 V1.5 的 5 个开工前设计点 —— 叙述层 md 定为知识卡的**单向投影**（D11）、新增 `codebase_runs` **run 级审计**表（D12）、新增独立 `/api/v1/codebase/*` 端点（D13）、CodebaseAnalyzer 模型与 token 硬预算（D14）。
@@ -222,6 +224,17 @@ examples 表（人工上传 / 后台导入样例语料）
 1. 每条 pattern **必须携带 evidence_ids**，无引用的规则直接拒绝
 2. pattern 默认 `review_status=pending`，审核后才 `approved` 进入召回
 3. 归纳的 LLM 原始输出写入 `learning_logs.llm_raw_response`（补齐 v2 欠账）
+
+**召回层分级过滤（N6，2026-08 已实现，`core/long_term/pg_store.py::review_conditions`）**：
+
+| 类型 | pending | approved | flagged / deprecated |
+|------|---------|----------|---------------------|
+| `pattern`（归纳类，`MODERATED_TYPES`） | ❌ 不召回 | ✅ 召回 | ❌ |
+| 其他类型（user/feedback/project/reference/task） | ✅ 召回 | ✅ 召回 | ❌ |
+
+理由：LLM 归纳是幻觉高发区，「无审核不召回」把幻觉挡在召回层之外；而聊天/观察素材是人喂的，V1 简化为 pending 即可召回（否则 V1 全部记忆都召不回）。`include_pending=False` 可收紧为「所有类型必须 approved」，供管理端/演示用。
+
+**边界（易错点）**：flush 的**去重比对**必须显式 `apply_review_filter=False`——它不是召回，若施加过滤则同名 pending 记忆无法被发现，会重复入库而非 merge。
 
 **开放问题（V1.5 启动前必须闭环）**：
 - 样例从哪来：人工上传样例集？还是从历史 chat 自动抽取（那会与 c 重叠）？
@@ -576,7 +589,7 @@ GET    /api/v1/memories/{id}
 POST   /api/v1/memories                      # 手动录入
 PUT    /api/v1/memories/{id}
 DELETE /api/v1/memories/{id}
-POST   /api/v1/memories/{id}/review          # 审核（pattern 必需人工审核）
+POST   /api/v1/memories/{id}/review          # 审核（pattern 必需人工审核） ✅ 已实现
 
 # Wiki
 POST   /api/v1/wiki                          # description 强制
@@ -681,7 +694,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 | 🟡 | 权重衰减硬编码 0.95/0.1，未读 `agent_spaces.config` | `core/learning.py:113` ✅ 已修复（day 3-5：manager 读 space.config 传入 run_pipeline） |
 | 🟡 | `_llm_analyze` 未剥离 ```json 代码块；失败回退走 `_direct_analyze` 而非 heuristic（与注释不符） | `core/learning.py:207,222` ✅ 已修复（day 3-5：剥离围栏、非数组/无效 JSON 返回空交给 P1-1 重试、不再静默回退） |
 | 🟡 | **N5：中文重排退化**——`ts_rank` 计算后被丢弃；ranker 空格 `.split()` 分词使中文意图成为单 token，重叠分≈0，重排退化为纯权重序 | `pg_store.py:74-82`、`orchestrator/ranker.py:9-26` ✅ 已修复（day 3-5：search 携带 ts_rank、ranker 按 weight×0.4+ts_rank×0.6 合并，含单测） |
-| 🟡 | **N6：`review_status` 从未参与召回过滤**（审核流装饰性，V1.5 pattern 上线必返工） | `pg_store.py:48-115` |
+| 🟡 | **N6：`review_status` 从未参与召回过滤**（审核流装饰性，V1.5 pattern 上线必返工） | `pg_store.py:48-115` ✅ 已修复（2026-08：`review_conditions()` 分级过滤——flagged/deprecated 全类型排除、pattern 必须 approved、其他类型 pending 即可召回；`get_hot`/`search` 接入，去重比对显式关闭过滤；补 review 审核端点；9 用例锁定，含反向验证） |
 | 🟡 | `query_db` 工具及其实现待删除（D3） | `mcp/tools.py:73-90`、`mcp/server.py:61-62,75-98` ✅ 已删除（day 6-7，回到 3 工具；asyncpg 双连接随之移除） |
 | 🟡 | REST 无鉴权、无 agent_id 隔离；flush 由 body 传 `agent_id`（违反身份不变式） | `api/spaces.py`、`api/webhooks.py:13-20` ✅ 已修复（Week 2：`api/deps.py` require_agent 中间件 + 全路由 Bearer 鉴权 + flush 改 key 解析身份，webhooks.py 并入 learning.py 后删除） |
 | 🟢 | 无 `backend/tests/`；`seed.py` 与 Alembic 双轨建表需统一 | — ✅ 测试已建（day 3-5：`tests/` 12 用例全绿，覆盖 P1-1/审计/衰减/解析/锁/ranker；pytest 需 session 级 loop 配置；seed.py 双轨仍未处理） |

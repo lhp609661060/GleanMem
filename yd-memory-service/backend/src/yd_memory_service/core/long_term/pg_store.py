@@ -9,6 +9,30 @@ from sqlalchemy import Text, cast, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yd_memory_service.core.models.long_term_memory import LongTermMemory
+from yd_memory_service.core.types import EXCLUDED_STATUSES, MODERATED_TYPES
+
+
+def review_conditions(*, include_pending: bool = True) -> list:
+    """召回的审核纪律过滤（N6）。
+
+    分级策略（01-design §b 防幻觉纪律 + 07 评审 N6 修复建议）：
+    - `flagged` / `deprecated`：**任何类型**都不进召回（人已判定不可用）；
+    - 归纳类（`MODERATED_TYPES`，即 pattern）：必须 `approved` 才进召回——
+      LLM 归纳是幻觉高发区，「无审核不召回」把幻觉挡在召回层之外；
+    - 其他类型：`pending` 即可召回（V1 简化：素材是人喂的，不是 LLM 归纳的）。
+
+    include_pending=False 时收紧为「所有类型都必须 approved」，供管理端/演示用。
+    """
+    conditions = [LongTermMemory.review_status.notin_(EXCLUDED_STATUSES)]
+    if include_pending:
+        # 归纳类单独收紧：非 pattern 放行 pending，pattern 必须 approved
+        conditions.append(
+            LongTermMemory.type.notin_(MODERATED_TYPES)
+            | (LongTermMemory.review_status == "approved")
+        )
+    else:
+        conditions.append(LongTermMemory.review_status == "approved")
+    return conditions
 
 
 class LongTermStore:
@@ -64,17 +88,22 @@ class LongTermStore:
         exclude_deleted: bool = True,
         min_weight: float = 0.0,
         with_rank: bool = False,
+        apply_review_filter: bool = True,
+        include_pending: bool = True,
     ) -> Sequence[LongTermMemory] | Sequence[tuple[LongTermMemory, float]]:
         """Full-text search.
 
         Uses tsvector if available (zhparser > simple), falls back to ILIKE.
         with_rank=True 返回 (memory, ts_rank) 元组供编排器合并排序（N5 修复）。
+        apply_review_filter=True 施加审核纪律（N6）；内部去重比对等非召回场景可关闭。
         """
         conditions = [LongTermMemory.agent_id == agent_id]
         if exclude_deleted:
             conditions.append(LongTermMemory.is_deleted == False)
         if min_weight > 0:
             conditions.append(LongTermMemory.weight >= min_weight)
+        if apply_review_filter:
+            conditions += review_conditions(include_pending=include_pending)
 
         # Try tsvector with available configs
         configs = await self._available_ts_configs()
@@ -141,10 +170,14 @@ class LongTermStore:
         *,
         top_k: int = 20,
         exclude_deleted: bool = True,
+        apply_review_filter: bool = True,
+        include_pending: bool = True,
     ) -> Sequence[LongTermMemory]:
         conditions = [LongTermMemory.agent_id == agent_id]
         if exclude_deleted:
             conditions.append(LongTermMemory.is_deleted == False)
+        if apply_review_filter:
+            conditions += review_conditions(include_pending=include_pending)
 
         stmt = (
             select(LongTermMemory)
