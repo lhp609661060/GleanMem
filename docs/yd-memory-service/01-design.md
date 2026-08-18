@@ -9,6 +9,8 @@
 > 决策记录见 §决策记录。v2 评审过程见 [02-review-round1.md](./02-review-round1.md) ~ [04-review-round3.md](./04-review-round3.md)，遗留修复手册见 [05-solutions.md](./05-solutions.md)，v3.1 架构评审见 [07-architect-review.md](./07-architect-review.md)。
 >
 > **v3.1 修订记录**（按 07 评审落 5 条修正意见）：Week 1 拆三段（day 1-2 建表链路+入口+P0-3 / day 3-5 数据完整性+审计+pytest / day 6-7 v3 契约迁移+删 query_db）；P0-3 前置 zhparser 三环修复；V1.5 拆 V1.5a/V1.5b；差距清单补 N1/N2 等评审新发现；观察分析器契约 Week 1 末冻结。
+>
+> **v3.2 修订记录**（2026-08，V1 验收后、V1.5 开工前）：V1 全部 🔴/🟡 差距关闭（23 测试绿、P0-3 100%）；闭环 V1.5 的 5 个开工前设计点 —— 叙述层 md 定为知识卡的**单向投影**（D11）、新增 `codebase_runs` **run 级审计**表（D12）、新增独立 `/api/v1/codebase/*` 端点（D13）、CodebaseAnalyzer 模型与 token 硬预算（D14）。
 
 ## 决策记录（v2 → v3）
 
@@ -24,6 +26,10 @@
 | D8 | 知识产物分层：memories / wiki（V1）+ pattern（V1.5） | 扁平记忆表接不住归纳性规则 |
 | D9 | **06 调研正式纳入**：codebase 蒸馏成为 V1.5 候选主线 | 需求来自 DSH 工作区场景（Repo Wiki 式代码库认知）；与 v3 骨架兼容，但需新增 batch 管线与修订保护 |
 | D10 | **codebase 蒸馏取代样例学习成为 V1.5 主线候选**，样例学习降级为其下游 pattern 归纳 | 「代码如何写决策」与代码蒸馏同源，不平行立项 |
+| D11 | **叙述层 md 是知识卡的单向投影**（知识卡为唯一事实源），md 默认进 Git | 服务端无仓库写权限（push-first 信任纪律），「服务端回写 md」不可实现；投影可重建 → 无需 merge 策略，接受 md 短期滞后 |
+| D12 | 新增 `codebase_runs` 表做 **run 级审计**（不是逐卡决策级） | batch 是生成而非学习决策，不走收件箱 → 须补审计链，使「卡 → run → commit SHA → 文件」可 trace |
+| D13 | 新增独立 `/api/v1/codebase/*` 端点，**不复用 observations** | 事件结构不同，硬塞会污染 observation 分析器契约（07 评审 §5.2 建议） |
+| D14 | CodebaseAnalyzer 用既有 `YDM_LLM_*` 模型 + Space 级 token 硬预算 + dry-run 先报后跑 | 不新增供应商依赖；防一次全量烧光演示预算（07 评审 §5.4） |
 
 ---
 
@@ -323,6 +329,75 @@ codebase 蒸馏是 v3 引入的**第一种 batch 型学习管线**，与既有 e
 - **知识卡层（Agent 读）**：注册进服务 `wiki_documents`，沿用 Skill 机制（description 检索 + 按需加载，即 Qoder 的「知识卡给 Agent 读」）
 - 蒸馏器一次产出两层：叙述层落盘文件、知识卡落库
 
+### 一致性策略：md 是知识卡的投影（闭环①，D11）
+
+**问题**：batch 一次产出两层没有一致性问题；但 event 增量在服务端 flush 内执行，**服务端没有 repo 文件系统访问权**——它改不了 `<repo>/.yd-memory/wiki/*.md`。若把「服务端回写 md」作为设计，等于要求服务端持有仓库写权限，与 push-first 的信任纪律冲突。
+
+**裁决**：**知识卡（DB）是唯一事实源，md 是它的本地投影（projection），不是并列副本。**
+
+- **写方向单一**：`知识卡 → md`，永不反向。md 由**客户端侧 CLI**（蒸馏器同一入口，`ydm-distill sync`）拉取本 Space 的 `source=codebase` 知识卡，在本地渲染成文件；服务端只负责 DB。
+- **batch**：客户端在本地跑蒸馏 → 上传知识卡 → 顺带落盘 md（一次调用，两层天然同步）。
+- **event 增量**：服务端只更新知识卡并给库里打 `wiki_sync_pending=true`；md 在下一次 `ydm-distill sync`（人手动 / CI 一步）时更新。**接受"md 短期滞后于知识卡"**——Agent 读的是卡（始终最新），人读的 md 允许延迟，这是有意的取舍，不是缺陷。
+- **投影是可重建的**：md 丢失/损坏不影响任何能力，重跑 sync 即恢复；因此 md **不参与**任何审计不变式。
+- **`protected` 例外**：人在 md 里改过并标记 protected 的段落，sync 不覆盖（先读本地 md 的 protected 标记，跳过对应文件），且该文件对应的卡也不被 event 增量重写（见 §人工修订保护）。
+- **叙述层是否进 Git（原开放问题 1）**：**默认进 Git**（`.yd-memory/wiki/` 提交，团队 pull 即得，对齐 Qoder）；因为它是可重建投影，冲突的解法永远是"重跑 sync"，不需要 merge 策略。不想共享的仓库自行 gitignore。
+
+### batch run 级审计（闭环②，D12）
+
+**问题**：batch 不走收件箱 → 不写 `learning_logs`，「全部知识可溯源可审计」对 codebase 产物断裂。
+
+**裁决**：新增 `codebase_runs` 表记录 **run 级**审计（不是逐卡决策级——batch 是生成，不是学习决策）：
+
+```sql
+CREATE TABLE codebase_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agent_spaces(agent_id),
+    mode VARCHAR NOT NULL,              -- batch | incremental
+    repo_path TEXT NOT NULL,            -- 客户端上报的仓库标识
+    commit_sha VARCHAR(40),             -- 蒸馏基线
+    files_scanned INT DEFAULT 0,        -- 排除清单过滤后的有效文件数
+    files_excluded INT DEFAULT 0,       -- 被排除数（体积治理可见性）
+    cards_written INT DEFAULT 0,
+    cards_skipped_protected INT DEFAULT 0,   -- 修订保护生效次数（演示要讲的数字）
+    tokens_used INT DEFAULT 0,
+    model VARCHAR(100),
+    status VARCHAR NOT NULL DEFAULT 'running',  -- running | succeeded | failed
+    error_message TEXT,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX idx_cbruns_agent ON codebase_runs(agent_id, started_at DESC);
+```
+
+- 每张知识卡的 `metadata.run_id` 指向产生它的 run → **卡 → run → commit SHA → 文件路径**审计链闭合。
+- event 增量**同时**写 `learning_logs`（逐事件决策，走收件箱）**和** `codebase_runs`（mode=incremental，run 级汇总），两者不互斥。
+- 审计入口：`GET /api/v1/codebase/runs`（复用 `learning/logs` 的分页形态）。
+
+### 入站端点（闭环③，D13）
+
+**裁决**：新增独立端点，不复用 `observations`（事件结构完全不同，硬塞会污染 observation 分析器契约）。
+
+```
+POST /api/v1/codebase/runs           # batch：开一个 run，返回 run_id（客户端上传卡时带上）
+POST /api/v1/codebase/cards          # batch：批量 upsert 知识卡（带 run_id，跳过 protected）
+POST /api/v1/codebase/refresh        # event 增量：CI/cron 推变更文件指纹 → 进收件箱（幂等）
+GET  /api/v1/codebase/runs           # 审计查询
+GET  /api/v1/codebase/cards?sync_pending=true   # CLI sync 拉取投影
+```
+
+`refresh` 的入站 body（幂等键 = `cb:{commit_sha}:{module}`）：
+
+```json
+{
+  "commit_sha": "a1b2c3d",
+  "changes": [
+    {"module": "core/learning", "files": [{"path": "core/learning.py", "fingerprint": "sha256:..."}], "change": "modified"}
+  ]
+}
+```
+
+→ 按 module 聚合成 `pending_events`（`source=codebase`，`event_type=module_changed`，`dedup_key=cb:{sha}:{module}`），flush 时由 `CodebaseAnalyzer` 只重生成受影响模块的卡。**服务端不读代码**：文件内容由客户端在 `refresh` 时按需附带（≤4KB/文件的片段）或由 CLI 直接走 batch 路径重传该模块——V1.5b 选前者，保持服务端零仓库访问权。
+
 ### 体积治理
 
 - 默认排除：`.venv` / `node_modules` / `site-packages` / 构建产物 / 锁文件（本仓库 5839 个文件里大部分是 vendored 依赖，是现成的反面教材）
@@ -339,17 +414,26 @@ codebase 蒸馏是 v3 引入的**第一种 batch 型学习管线**，与既有 e
 
 ### 开放问题（V1.5 启动前闭环）
 
-1. 叙述层是否随 Git 提交共享（Qoder 做法）还是仅本地
-2. 叙述层与知识卡的同步策略（同源双产物的一致性维护）
-3. CodebaseAnalyzer 的模型选择与成本上限（单仓全量 token 预算）
-4. batch 的批处理审计日志（batch 不走收件箱 → 不写 learning_logs，须补 run 级日志维持「全部知识可溯源可审计」）
-5. codebase 入站端点（event 增量的 CI 回调需要新增 `POST /api/v1/codebase/refresh`，不复用 observations）
+| # | 问题 | 状态 |
+|---|------|------|
+| 1 | 叙述层是否随 Git 提交共享 | ✅ 已闭环（D11）：默认进 Git，因其为可重建投影，冲突解法是重跑 sync |
+| 2 | 叙述层与知识卡的同步策略 | ✅ 已闭环（D11）：知识卡为唯一事实源，md 是单向投影，接受 md 短期滞后 |
+| 3 | CodebaseAnalyzer 模型选择与成本上限 | ✅ 已闭环（D14）：见下 |
+| 4 | batch 的批处理审计日志 | ✅ 已闭环（D12）：新增 `codebase_runs` run 级审计表 |
+| 5 | codebase 入站端点 | ✅ 已闭环（D13）：新增 `/api/v1/codebase/*`，不复用 observations |
+
+**模型与成本上限（闭环③补，D14）**：
+
+- 模型走既有 `YDM_LLM_*` 配置（不新增供应商），默认用与 flush 同一个便宜模型（`gpt-4o-mini` 级）；蒸馏 prompt 单模块独立调用，无跨模块上下文依赖 → 可并发、可断点续跑。
+- **硬预算**：`codebase_runs` 累计 `tokens_used` 超过 Space 级上限（`agent_spaces.config.codebase_token_budget`，默认 300k）即中止 run 并写 `status=failed`，避免一次全量烧光演示预算。
+- **先报后跑**：蒸馏器第一步是 dry-run——按排除清单过滤后报出「有效文件数 + 预估 token + 预估费用」，人确认再执行（对齐 07 评审 §5.4 的要求）。
+- 演示规模锚定：**一个小型真实仓库（几千行源码）**，不追 4000 文件量级。
 
 ### 切片（V1.5a / V1.5b）
 
-- **V1.5a**：batch 全量 + `protected` + 双层产物 + 体积治理（约 1.5-2 周，可独立演示）
-- **V1.5b**：event 增量（指纹 diff + 模块聚合 + 单模块重生成 + md 同步）（约 1-1.5 周）
-- **前置依赖**：V1 的 P0-3（zhparser 中文召回）验证通过；不通过转 pgvector 则知识卡检索方案重写
+- **V1.5a** ✅ 已完成：batch 全量 + `protected` + 双层产物 + 体积治理 + `codebase_runs` 审计 + `WikiStore.search` source 过滤
+- **V1.5b**：event 增量（指纹 diff + 模块聚合 + 单模块重生成 + md 投影 sync）（约 1-1.5 周）——入站口已通，待做 flush 侧 `source=codebase` 分派
+- **前置依赖**：V1 的 P0-3（zhparser 中文召回）验证通过 ✅；5 个开工前设计点已闭环（D11-D14）✅
 
 ---
 
@@ -418,7 +502,13 @@ CREATE TABLE long_term_memories (
 
 ### `wiki_documents`
 
-v2 不变。`metadata` 增加溯源约定：`source=observation` 记录来源；`source=codebase` 记录文件路径 / commit SHA / 指纹；`protected=true` 标记人工修订保护（自动更新跳过）。
+v2 不变。`metadata` 增加溯源约定：`source=observation` 记录来源；`source=codebase` 记录文件路径 / commit SHA / 指纹 / `run_id`（指向 `codebase_runs`）；`protected=true` 标记人工修订保护（自动更新跳过）；`wiki_sync_pending=true` 表示知识卡已更新、md 投影待 sync（见 D11）。
+
+**V1.5a 需补的检索配合**（07 评审 §5.3）：`WikiStore.search` 加 `source` / `tags` 过滤参数，避免 codebase 卡与业务 wiki 同表混池后挤占 Top3；上线前跑一次「蒸馏 100 张卡 × 20 query」召回评估（对齐 P0-3 的方法）。
+
+### `codebase_runs`（V1.5a 新增）
+
+见 §代码库蒸馏·batch run 级审计（D12）的 DDL。
 
 ### `pending_events`
 
@@ -481,6 +571,13 @@ GET    /api/v1/learning/logs?page=1
 
 # 观察（v3 新增）
 POST   /api/v1/observations                  # 业务方 push 观察事件（幂等）
+
+# 代码库蒸馏（V1.5a 新增，见 §代码库蒸馏 D13）
+POST   /api/v1/codebase/runs                 # batch：开 run，返回 run_id
+POST   /api/v1/codebase/cards                # batch：批量 upsert 知识卡（带 run_id，跳过 protected）
+POST   /api/v1/codebase/refresh              # event 增量：CI/cron 推变更指纹进收件箱（幂等）
+GET    /api/v1/codebase/runs                 # run 级审计查询
+GET    /api/v1/codebase/cards?sync_pending=true   # CLI sync 拉取 md 投影
 ```
 
 ---
@@ -530,9 +627,9 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 
 ### V1.5（候选主线，拆两片）
 
-- **V1.5a（约 1.5-2 周，可独立演示）**：batch 全量管线 + `protected` 修订保护 + 双层产物（叙述层 md + 知识卡进服务）+ 体积治理。演示目标：小型真实仓库自动出 wiki、人改不被覆盖。
-- **V1.5b（约 1-1.5 周）**：event 增量（文件指纹 diff + 模块聚合 + 单模块重生成 + 叙述层 md 同步策略）。
-- **开工前必须闭环 3 个设计点**：① 叙述层 md 与知识卡的一致性策略；② batch 的批处理审计日志（run 级：repo 路径、commit SHA、卡片数、token 用量）；③ codebase 入站端点（新增 `POST /api/v1/codebase/refresh`，不复用 observations）。
+- **V1.5a（约 1.5-2 周，可独立演示）**：batch 全量管线 + `protected` 修订保护 + 双层产物（叙述层 md + 知识卡进服务）+ 体积治理 + `codebase_runs` run 级审计。演示目标：小型真实仓库自动出 wiki、人改不被覆盖。✅ **已完成**（2026-08：`codebase_runs` 迁移 + scanner/analyzer/store/projection + `/api/v1/codebase/*` 5 端点 + `ydm-distill` CLI（scan/run/sync）+ `WikiStore.search` source 过滤；35 测试绿、端到端 10 步全通过）
+- **V1.5b（约 1-1.5 周）**：event 增量（文件指纹 diff + 模块聚合 + 单模块重生成 + md 投影 sync）。入站口 `POST /api/v1/codebase/refresh` 已在 V1.5a 开通并验证幂等；**待做**：flush 侧 `CodebaseAnalyzer` 的 `source=codebase` 分派 + 指纹 diff 比对 + 单模块重生成。
+- **开工前 3 个设计点已闭环**（2026-08）：① md 是知识卡的单向投影、接受短期滞后（D11）；② `codebase_runs` run 级审计表（D12）；③ 独立 `/api/v1/codebase/*` 端点（D13）。另闭环模型与成本上限（D14）。
 - 样例学习降级为下游 pattern 归纳，视资源实施。
 
 ### V2（视需求）
@@ -555,7 +652,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 | 🔴 | 迁移先建 trigger、后靠 `init-db.sql` 建函数，标准流程（先 alembic 后 docker init）会失败 | 迁移文件 + `init-db.sql` 顺序 ✅ 已修复（day 1-2：函数 DDL 内联进迁移，init-db.sql 只保留扩展与配置） |
 | 🔴 | **N1：P1-1 未落地**——LLM 空/失败决策时本批事件被无条件删除（静默丢素材），`retry_count` 从未使用 | `core/learning.py:106-110`；对照 `05-solutions.md` P1-1 ✅ 已修复（day 3-5：空/部分决策保留事件+retry_count 递增，≥3 次写 failed 日志再删，含单测） |
 | 🔴 | **N2：启动入口缺失**——console script 指向不存在的 `main()`，`uv run yd-memory` 直接 AttributeError | `pyproject.toml:25`、`main.py` ✅ 已修复（day 1-2：main.py 补 `def main()`） |
-| 🔴 | `load_memory` 无归属校验，任意 memory id 可跨 Space 读取 | `mcp/server.py:51-54` |
+| 🔴 | `load_memory` 无归属校验，任意 memory id 可跨 Space 读取 | `mcp/server.py:51-54` ✅ 已修复（Week 2：改用 `get_scoped(id, agent_id)` 归属过滤，跨 Space 读取返回不存在，含测试） |
 | 🟡 | `learning_logs.llm_raw_response` 从未写入（审计不变式未兑现） | `core/learning.py` ✅ 已修复（day 3-5：llm 模式每次决策写入原始输出，含 failed 日志） |
 | 🟡 | 权重衰减硬编码 0.95/0.1，未读 `agent_spaces.config` | `core/learning.py:113` ✅ 已修复（day 3-5：manager 读 space.config 传入 run_pipeline） |
 | 🟡 | `_llm_analyze` 未剥离 ```json 代码块；失败回退走 `_direct_analyze` 而非 heuristic（与注释不符） | `core/learning.py:207,222` ✅ 已修复（day 3-5：剥离围栏、非数组/无效 JSON 返回空交给 P1-1 重试、不再静默回退） |
@@ -595,7 +692,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 修复差距清单全部 🔴/🟡 + zhparser 验证 + 身份层 + 观察 push + 三份集成指南。
 
 ### V1.5（候选主线，拆两片）
-V1.5a（约 1.5-2 周）：batch 全量 + `protected` 修订保护 + 双层产物（可独立演示）；V1.5b（约 1-1.5 周）：event 增量。开工前闭环 md/知识卡一致性、batch 审计日志、codebase 入站端点三个设计点。样例学习降级为下游 pattern 归纳。
+V1.5a（约 1.5-2 周）：batch 全量 + `protected` 修订保护 + 双层产物 + `codebase_runs` 审计（可独立演示）；V1.5b（约 1-1.5 周）：event 增量。开工前的 md/知识卡一致性、batch 审计日志、codebase 入站端点三个设计点已闭环（D11-D13，另 D14 定成本上限）。样例学习降级为下游 pattern 归纳。
 
 ### V2
 业务观察 pull producer 回融、内置调度器、pgvector、管理前端、样例学习剩余部分。
