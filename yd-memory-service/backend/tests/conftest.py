@@ -15,6 +15,7 @@ from sqlalchemy import delete
 from yd_memory_service.core.database import async_session_factory
 from yd_memory_service.core.models import (
     AgentSpace,
+    CodebaseRun,
     LearningLog,
     LongTermMemory,
     PendingEvent,
@@ -22,7 +23,7 @@ from yd_memory_service.core.models import (
 )
 from yd_memory_service.main import app
 
-_CLEANUP_MODELS = (WikiDocument, LearningLog, LongTermMemory, PendingEvent)
+_CLEANUP_MODELS = (WikiDocument, LearningLog, LongTermMemory, PendingEvent, CodebaseRun)
 
 
 async def _purge_space(agent_id: str) -> None:

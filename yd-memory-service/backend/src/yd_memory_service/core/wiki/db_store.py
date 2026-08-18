@@ -40,7 +40,14 @@ class WikiStore:
         *,
         top_k: int = 5,
         include_global: bool = True,
+        source: str | None = None,
+        exclude_source: str | None = None,
     ) -> Sequence[WikiDocument]:
+        """全文检索 wiki。
+
+        source / exclude_source 按 metadata.source 过滤（V1.5a，07 评审 §5.3）：
+        codebase 知识卡与业务 wiki 同表混池，不过滤时卡量大会挤占 Top3。
+        """
         conditions = [WikiDocument.is_deleted == False]
 
         if agent_id is not None:
@@ -51,6 +58,15 @@ class WikiStore:
                 )
             else:
                 conditions.append(WikiDocument.agent_id == agent_id)
+
+        if source is not None:
+            conditions.append(WikiDocument.extra_meta["source"].astext == source)
+        if exclude_source is not None:
+            # metadata 无 source 键的历史条目视为「非该 source」，须保留
+            conditions.append(
+                (WikiDocument.extra_meta["source"].astext != exclude_source)
+                | (WikiDocument.extra_meta["source"].is_(None))
+            )
 
         configs = await self._available_ts_configs()
         for cfg in ("zhparser", "simple"):

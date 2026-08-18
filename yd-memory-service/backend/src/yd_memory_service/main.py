@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from yd_memory_service.api.codebase import router as codebase_router
 from yd_memory_service.api.learning import router as learning_router
 from yd_memory_service.api.memories import router as memories_router
 from yd_memory_service.api.observations import router as observations_router
@@ -47,6 +48,7 @@ app.include_router(learning_router)
 app.include_router(observations_router)
 app.include_router(recall_router)
 app.include_router(memories_router)
+app.include_router(codebase_router)
 
 # MCP SSE — mount the MCP Starlette app under FastAPI
 app.mount("/mcp", mcp_app)

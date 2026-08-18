@@ -15,6 +15,7 @@ from yd_memory_service.core.models import (  # noqa: F401
     WikiDocument,
     PendingEvent,
     LearningLog,
+    CodebaseRun,
 )
 
 config = context.config
