@@ -674,7 +674,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 - pull producer 回融（在其他项目积累成熟后）
 - 内置调度器（Space 级 cron）
 - pgvector 语义检索（若 zhparser 召回不达标）
-- 管理前端 2 页 + 学习日志页
+- ~~管理前端 2 页 + 学习日志页~~ ✅ 已提前实现（2026-08，超出原计划：5 页 Vue 3 + Vite——记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览。N6 审核闭环可视化演示）
 
 ---
 

@@ -12,7 +12,7 @@ This repository contains the design, spike experiments, and backend implementati
   - `src/yd_memory_service/mcp/` — MCP SSE server and tools (`recall`, `load_memory`, `memorize`).
   - `src/yd_memory_service/cli/` — `ydm-distill` client CLI (`scan` dry-run / `run` distill+upload / `sync` md projection). Reads the repo locally; the server never touches a working tree (design D11).
   - `alembic/` — database migrations.
-- `yd-memory-service/frontend/` — planned Vue frontend; currently empty.
+- `yd-memory-service/frontend/` — Vue 3 + Vite admin UI (5 pages: memories/review, learning logs, codebase cards, distillation audit, recall preview). Read-only plus the N6 review action; `npm install && npm run dev` proxies `/api` to port 8000. See `frontend/README.md`. `space_key` lives in sessionStorage only.
 - `spike/` — disposable Dify/MCP verification scripts, not V1 code.
 - `yd-memory-service/docker-compose.yml` — local PostgreSQL service.
 
