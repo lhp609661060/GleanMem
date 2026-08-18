@@ -44,4 +44,11 @@ Use `pytest` with `asyncio_mode = "auto"` (already configured in `backend/pyproj
 
 ## Commit & Pull Request Guidelines
 
-This tree has no Git metadata yet. When version control is initialized, use Conventional Commits with a module scope, for example `feat(backend): add recall reranking` or `docs(design): update roadmap`. Pull requests should explain the change, link the relevant design or issue, call out migrations and environment-variable changes, and include screenshots for UI work.
+Git is initialized on branch `main` (initial commit: chore, 2026-08). Use Conventional Commits with a module scope, for example `feat(backend): add recall reranking`, `fix(core): keep pending events on empty LLM decisions`, or `docs(design): update roadmap`. Common scopes: `backend` / `core` / `mcp` / `docker` / `docs` / `spike` / `chore`.
+
+Rules:
+- One logical change per commit; run `uv run pytest` in `backend/` before committing backend changes.
+- Never commit secrets: `space_key` exists only in the database; `.env` is gitignored.
+- `.venv/`, `__pycache__/`, `.DS_Store`, `*.egg-info` are gitignored — verify with `git status` before committing.
+- Tag milestones (`git tag v0.1.0` etc.) at each phase boundary (V1 done → v0.1.0, V1.5 → v0.2.0).
+- Pull requests should explain the change, link the relevant design or issue, call out migrations and environment-variable changes, and include screenshots for UI work.
