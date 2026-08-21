@@ -5,8 +5,6 @@ Not an Agent: no loop, no tool calling, no LLM decisions in V1.
 
 from __future__ import annotations
 
-import asyncio
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yd_memory_service.core.long_term.pg_store import LongTermStore
@@ -33,11 +31,11 @@ async def recall(intent: str, agent_id: str, session: AsyncSession) -> RecallRes
     mem_store = LongTermStore(session)
     wiki_store = WikiStore(session)
 
-    hot_task = mem_store.get_hot(agent_id, top_k=20)
-    cold_task = mem_store.search(intent, agent_id, top_k=5, with_rank=True)
-    wiki_task = wiki_store.search(intent, agent_id, top_k=3)
-
-    hot, cold, wiki = await asyncio.gather(hot_task, cold_task, wiki_task)
+    # 同一 AsyncSession 不支持并发任务（SQLAlchemy async 限制），三路顺序执行；
+    # V1 三路都是毫秒级查询，顺序执行不影响体感。
+    hot = await mem_store.get_hot(agent_id, top_k=20)
+    cold = await mem_store.search(intent, agent_id, top_k=5, with_rank=True)
+    wiki = await wiki_store.search(intent, agent_id, top_k=3)
 
     # merge by id, hot takes priority；冷路带上 ts_rank 供重排（N5 修复）
     seen = {m.id for m in hot}
