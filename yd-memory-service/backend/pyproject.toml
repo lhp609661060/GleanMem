@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "yd-memory-service"
 version = "0.1.0"
@@ -17,6 +21,9 @@ dependencies = [
     "httpx>=0.28",
     "openai>=1.0", # for LearningModel LLM mode
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv]
 constraint-dependencies = ["cryptography<45"]

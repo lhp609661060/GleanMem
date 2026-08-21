@@ -24,3 +24,6 @@ build/
 
 # 日志与临时文件
 *.log
+
+# 浏览器截图（调试产物）
+browser-screenshots/
