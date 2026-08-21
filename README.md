@@ -1,6 +1,13 @@
 # yd-memory-service
 
-面向多 Agent 的**外挂记忆与学习服务**。不绑定任何 Agent 框架，三种接入方式并存：Dify 走 MCP、其他 Agent 走 REST、业务系统走推送。
+面向多 Agent 的**外挂记忆与学习服务**。不绑定任何 Agent 框架，四种接入方式并存：
+
+| 接入方 | 方式 |
+|--------|------|
+| Dify | MCP（SSE，`recall` / `load_memory` / `memorize`） |
+| DSH | REST 直连 或 MCP stdio，附**一键接入脚本** |
+| 其他 Agent | REST（per-space API Key） |
+| 业务系统 | 推送（观察事件，幂等入收件箱） |
 
 目标是把「Agent 的长期记忆」做成可复用的基础设施，而不是某个平台的内置功能。
 
@@ -22,9 +29,7 @@
 
 ### 召回编排器是函数，不是 Agent
 
-召回路径**不引入 loop、不做工具调用、不让 LLM 参与决策**。三路检索（热记忆 / 冷检索 / Wiki）后按规则重排。
-
-召回是高频路径，LLM 介入会让延迟和成本都不可预测。规则重排足以覆盖主要场景；LLM 重排留给后续版本。
+召回路径**不引入 loop、不做工具调用、不让 LLM 参与决策**。三路检索（热记忆 / 冷检索 / Wiki）后按规则重排（`weight × 0.4 + ts_rank × 0.6`）。中文检索用 `tsvector + zhparser`，查询语义「AND 优先、空结果降级 OR」，实测自然语言召回 20/20 = 100%、p95 5.4ms。
 
 ### 只暴露三个 MCP 工具
 
@@ -36,13 +41,9 @@
 
 > 提交后不会立即生效，在对话结束后由学习模型统一分析处理。如需引用刚提交的信息，从对话上下文获取，不要依赖 recall。
 
-给 LLM 讲清副作用边界，比事后修补它的误用更有效。
-
 ### PostgreSQL 是唯一运行时依赖
 
-不引入 Redis、不引入独立向量库。待处理事件和学习日志都是 PG 表而非消息队列，中文检索用 `tsvector + zhparser`。
-
-这东西要给别人接入，**多一个中间件就多一道部署门槛**。
+不引入 Redis、不引入独立向量库。待处理事件和学习日志都是 PG 表而非消息队列，中文检索用 `tsvector + zhparser`。多一个中间件就多一道部署门槛。
 
 ### 学习延迟执行 + 全程可审计
 
@@ -50,79 +51,106 @@
 - 跑在按 `agent_id` 加的 **PG advisory lock** 下防并发
 - 三种学习模式：LLM 决策 / 启发式 / 直写
 - 每条决策写 `learning_logs`，**含 LLM 原始响应**，出问题能追到是哪次推理写错了
+- LLM 空/失败决策不静默删事件：保留 + `retry_count` 递增，超阈值才写 failed 日志
 
 ### 防幻觉与人工保护
 
 - **evidence 强制**：观察类归纳必须附来源事件引用，不允许凭空产生知识
 - **失败不静默**：代码库蒸馏单模块失败即返回 None 并记入错误计数，绝不产出半成品知识卡
 - **人工编辑保护**：自动更新跳过 `metadata.protected` 条目，不覆盖人的修正
+- **审核过滤**：`pattern` 类归纳必须 `approved` 才进召回，`flagged`/`deprecated` 全类型排除
 
 ---
 
 ## 架构
 
 ```
-                  ┌──────────────┐
-   Dify ──MCP────▶│              │
-   其他 Agent ──REST──▶  本服务   │───▶ PostgreSQL
-   业务系统 ──推送──▶│              │     (唯一依赖)
-                  └──────────────┘
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-     RecallOrchestrator      LearningModel
-     (函数，规则重排)         (延迟执行 + 审计)
+                    ┌─────────────────┐
+   Dify ───MCP─────▶│                 │
+   DSH  ──REST/MCP─▶│   yd-memory-    │────▶ PostgreSQL（唯一运行时依赖）
+   其他 Agent ─REST─▶│   service       │         ├─ long_term_memories
+   业务系统 ─推送───▶│                 │         ├─ wiki_documents
+                    └─────────────────┘         ├─ pending_events（统一收件箱）
+                          │                      └─ learning_logs（审计）
+              ┌───────────┴────────────┐
+              ▼                        ▼
+     RecallOrchestrator         LearningModel
+     （函数，规则重排）          （延迟执行 + 审计）
+              │                        ▲
+              ▼                        │
+     平台管理台（admin key）   V1.5 代码库蒸馏（批量 + 增量）
+     空间管理 / 文档 / 审核
 ```
 
 | 模块 | 职责 |
 |------|------|
-| `mcp/` | 3 个 MCP 工具 + SSE server |
-| `orchestrator/` | 召回编排与规则重排 |
-| `core/learning.py` | 学习模型（三种模式） |
-| `core/long_term/` | 长期记忆存储（含权重衰减） |
-| `core/wiki/` | Wiki 文档存储（Skill 式 description 匹配） |
-| `core/codebase/` | 代码库蒸馏（批量 + 增量双轨） |
-| `api/` | REST 接口 |
-| `frontend/` | Vue 3 管理后台 |
+| `backend/src/.../mcp/` | 3 个 MCP 工具 + SSE server + stdio 入口 |
+| `backend/src/.../orchestrator/` | 召回编排与规则重排 |
+| `backend/src/.../core/learning.py` | 学习模型（三种模式） |
+| `backend/src/.../core/long_term/` | 长期记忆存储（含权重衰减） |
+| `backend/src/.../core/wiki/` | Wiki 文档存储（Skill 式 description 匹配） |
+| `backend/src/.../core/codebase/` | 代码库蒸馏（批量 + 增量双轨） |
+| `backend/src/.../api/` | REST 接口（含 per-space API Key 鉴权） |
+| `frontend/` | Vue 3 管理后台（平台管理台 + 空间业务视图） |
+| `dsh/` | DSH 一键接入脚本 + skill |
+
+---
+
+## 目录结构
+
+```
+yd-agent/
+├── docs/yd-memory-service/     # 设计文档（01-design 为权威，v3.4）+ 评审记录
+├── yd-memory-service/
+│   ├── backend/                # FastAPI 后端（src layout）
+│   │   ├── src/yd_memory_service/
+│   │   ├── tests/              # 69 个 pytest 用例（打真实 PG）
+│   │   └── alembic/            # 数据库迁移
+│   ├── frontend/               # Vue 3 + Vite 管理后台
+│   ├── dsh/                    # DSH 一键接入（install.py + skill）
+│   └── docker-compose.yml      # 本地 PostgreSQL（含 zhparser 镜像）
+└── spike/                      # Dify/MCP 验证脚本（非 V1 代码）
+```
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 起 PostgreSQL
-docker compose up -d
+# 1. 起 PostgreSQL（含 zhparser 扩展的 PG14 镜像）
+docker compose -f yd-memory-service/docker-compose.yml up -d
 
 # 2. 后端
-cd backend
+cd yd-memory-service/backend
 uv sync
-cp .env.example .env        # 填入 DB 与 LLM 配置
+cp .env.example .env            # 填数据库与 LLM 配置（可选）
 uv run alembic upgrade head
-uv run uvicorn yd_memory_service.main:app --reload
+uv run uvicorn yd_memory_service.main:app --host 127.0.0.1 --port 8000
 
 # 3. 前端（可选）
-cd frontend && npm install && npm run dev
+cd yd-memory-service/frontend && npm install && npm run dev
 ```
 
 测试需要本地 PG 容器运行（用例打真实数据库）：
 
 ```bash
-cd backend && uv run pytest
+cd yd-memory-service/backend && uv run pytest
 ```
 
 ---
 
 ## 技术栈
 
-Python 3.11+ / FastAPI / SQLAlchemy 2.0 async / PostgreSQL（tsvector + zhparser）/ MCP SSE / Vue 3 + Vite / Docker Compose
+Python 3.12+ / FastAPI / SQLAlchemy 2.0 async / PostgreSQL（`tsvector + zhparser`）/ MCP SSE + stdio / Vue 3 + Vite / Docker Compose
 
 ---
 
 ## 状态与边界
 
-- 后端实现 V1 + V1.5a（批量代码库蒸馏）+ V1.5b（事件增量）
-- 测试 59 个用例
-- 前端 Vue 3 管理后台（记忆 / 知识卡 / 日志 / 召回调试 / 运行记录）
+- 后端实现 **V1 + V1.5a**（批量代码库蒸馏）+ **V1.5b**（事件增量）+ N6 审核过滤，设计文档见 `docs/yd-memory-service/01-design.md`
+- 平台管理台：**admin key** 登录管理所有空间（创建 / 编辑 / 归档 / 轮换 key），空间业务视图按 space key 隔离
+- 前端 7 页：空间管理 / 文档（Dify + DSH 接入指南）/ 记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览
+- 测试 69 个用例全绿
 - **诚实说明**：这是个人项目，用于验证「Agent 外挂记忆」这套设计思路，未经大规模生产流量验证。设计过程做了三轮递进式评审（找 bug → 找未验证假设 → 质疑根本方向），并据此主动砍掉了部分过度设计的功能。
 
 ---
