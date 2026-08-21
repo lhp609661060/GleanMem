@@ -1,0 +1,21 @@
+# DSH 接入 yd-memory-service 的 MCP 插件 patch（供 `dsh --patch` 或 profile patch 使用）
+# 用法：
+#   1) 临时启动：dsh web --patch ./docs/dsh-mcp-patch.yml
+#   2) 永久生效：把本段合并进 ~/.dsh/profiles/web/cordis.patch.yml
+# 注意：本文件由 `dsh/install.py` 自动生成同等内容（路径与 YDM_AGENT_ID 按本机实际值填）。
+# 手动维护时，把 <repo> 换成本仓库绝对路径、<your-agent-id> 换成创建 Space 后拿到的 agent_id。
+- id: mcp-ydmemory
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: ydmemory
+    transport: stdio
+    command: /usr/bin/env
+    args:
+      - '-u'
+      - __PYVENV_LAUNCHER__
+      - <repo>/yd-memory-service/backend/.venv/bin/python
+      - <repo>/yd-memory-service/backend/src/yd_memory_service/mcp/stdio_server.py
+    cwd: <repo>/yd-memory-service/backend
+    env:
+      PYTHONPATH: <repo>/yd-memory-service/backend/src
+      YDM_AGENT_ID: <your-agent-id>

@@ -39,3 +39,23 @@ curl -X POST http://localhost:8000/api/v1/spaces \
 - `agent_id` 永远不出现在 body/参数里，只由 key 解析（身份不变式）
 - A 的 key 无法读写 B 的空间（测试覆盖：`tests/test_auth.py::test_space_key_isolates_data`）
 - flush 不接收 body 身份字段，传了也被忽略
+
+## 5. 一键接入脚本（推荐）
+
+`dsh/install.py`（或 `dsh/install.sh`）会自动完成：起后端（如未运行）→ 创建/复用 Space 并写入 `backend/.env` → 安装 DSH skill（`ydm-memory-client`）→ 把 MCP 插件实例合并进 `~/.dsh/profiles/<profile>/cordis.patch.yml` → 验证 MCP stdio 入口。
+
+```bash
+cd yd-memory-service
+./dsh/install.sh                 # 默认 web profile
+./dsh/install.sh --profile tui   # 其他 profile
+./dsh/install.sh --no-start-backend
+```
+
+## 6. 手动 MCP stdio 接入（可选）
+
+DSH 自带 `@deepseek-ai/dsh-mcp-client`，也可以不写 REST 调用层，直接让 DSH 把 yd-memory-service 的 3 个 MCP 工具注册为 `mcp__ydmemory__*`。
+
+- 入口脚本：`backend/src/yd_memory_service/mcp/stdio_server.py`（身份来自 `YDM_AGENT_ID` 环境变量）
+- DSH 插件 patch 样例：`docs/dsh-mcp-patch.yml`（install.py 会自动生成并合并，无需手改）
+
+注意：MCP 三工具里没有 flush（设计如此）；会话结束仍要用 REST `POST /api/v1/learning/flush`（key 鉴权）触发学习落库。
