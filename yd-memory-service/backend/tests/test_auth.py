@@ -66,7 +66,7 @@ async def test_space_endpoints_require_auth(space_client):
     async with _client() as client:
         assert (await client.get("/api/v1/spaces")).status_code == 401
         assert (await client.get(f"/api/v1/spaces/{agent_id}")).status_code == 401
-        assert (await client.put(f"/api/v1/spaces/{agent_id}?name=hacked")).status_code == 401
+        assert (await client.put(f"/api/v1/spaces/{agent_id}", json={"name": "hacked"})).status_code == 401
         assert (await client.delete(f"/api/v1/spaces/{agent_id}")).status_code == 401
 
 
@@ -102,7 +102,7 @@ async def test_cross_space_mutation_blocked(space_client):
     key_b, agent_b = await space_client()
 
     async with _client({"Authorization": f"Bearer {key_a}"}) as ca:
-        assert (await ca.put(f"/api/v1/spaces/{agent_b}?name=hacked")).status_code == 404
+        assert (await ca.put(f"/api/v1/spaces/{agent_b}", json={"name": "hacked"})).status_code == 404
         assert (await ca.delete(f"/api/v1/spaces/{agent_b}")).status_code == 404
 
     async with _client({"Authorization": f"Bearer {key_b}"}) as cb:
@@ -113,7 +113,7 @@ async def test_own_space_update_persists(space_client):
     """自己的 Space 可改，且改动真落库（原实现只 flush 未 commit）。"""
     key, agent_id = await space_client()
     async with _client({"Authorization": f"Bearer {key}"}) as client:
-        r = await client.put(f"/api/v1/spaces/{agent_id}?name=renamed")
+        r = await client.put(f"/api/v1/spaces/{agent_id}", json={"name": "renamed"})
         assert r.status_code == 200
         assert r.json()["name"] == "renamed"
         # 重新读取确认持久化

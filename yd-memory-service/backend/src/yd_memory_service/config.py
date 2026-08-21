@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = False
 
+    # 平台管理台 admin key（YDM_ADMIN_KEY）；为空则禁用平台管理（管理台/用户管理）
+    admin_key: str = ""
+
     # Defaults for new Agent Spaces
     default_max_memories: int = 5000
     default_decay_per_day: float = 0.95

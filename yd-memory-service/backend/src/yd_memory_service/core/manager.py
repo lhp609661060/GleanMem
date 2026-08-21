@@ -43,6 +43,20 @@ class MemoryManager:
         await self.session.flush()
         return space, space_key
 
+    async def rotate_key(self, agent_id: str) -> tuple[AgentSpace, str] | None:
+        """轮换 Space 的 space_key：旧 key 立即失效，返回新 key 明文（仅本次）。"""
+        import hashlib
+        import secrets
+
+        space = await self.session.get(AgentSpace, agent_id)
+        if not space:
+            return None
+        space_key = f"ydm_{secrets.token_urlsafe(32)}"
+        space.api_key_hash = hashlib.sha256(space_key.encode()).hexdigest()
+        space.api_key_prefix = space_key[:8]
+        await self.session.flush()
+        return space, space_key
+
     async def get_space(self, agent_id: str) -> AgentSpace | None:
         return await self.session.get(AgentSpace, agent_id)
 
