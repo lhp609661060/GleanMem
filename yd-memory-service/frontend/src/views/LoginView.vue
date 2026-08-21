@@ -2,7 +2,7 @@
 /** 登录：输入 space_key。key 只进 sessionStorage，见 api/client.js。 */
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, setKey } from '../api/client'
+import { api, setAdminKey, setKey, setRole } from '../api/client'
 
 const router = useRouter()
 const key = ref('')
@@ -19,9 +19,17 @@ async function submit() {
   busy.value = true
   setKey(trimmed)
   try {
-    // 用一次真实请求验证 key，避免存下无效 key 后每页都报错
-    await api.listSpaces()
-    router.push({ name: 'memories' })
+    // 用一次真实请求验证 key 并探明身份：admin 进管理台，space 进业务视图
+    const me = await api.authMe()
+    if (me.role === 'admin') {
+      setRole('admin')
+      setAdminKey(trimmed)
+      router.push({ name: 'spaces' })
+    } else {
+      setRole('space')
+      setAdminKey('')
+      router.push({ name: 'memories' })
+    }
   } catch (e) {
     setKey('')
     error.value = e.message
@@ -36,7 +44,8 @@ async function submit() {
     <div class="card">
       <h1 style="margin: 0 0 6px; font-size: 19px">yd-memory-service 管理端</h1>
       <p class="muted" style="margin-top: 0">
-        输入 Space 的 <span class="mono">space_key</span> 以查看该空间的记忆、审核状态与审计链。
+        输入 <span class="mono">admin_key</span> 进入平台管理台（管理所有空间），或输入
+        <span class="mono">space_key</span> 进入某个空间。
       </p>
 
       <form @submit.prevent="submit">

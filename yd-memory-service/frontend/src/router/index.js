@@ -1,8 +1,20 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { hasKey } from '../api/client'
+import { getRole, hasKey } from '../api/client'
 
 const routes = [
   { path: '/', redirect: '/memories' },
+  {
+    path: '/spaces',
+    name: 'spaces',
+    component: () => import('../views/SpacesView.vue'),
+    meta: { title: '空间管理' },
+  },
+  {
+    path: '/docs',
+    name: 'docs',
+    component: () => import('../views/DocsView.vue'),
+    meta: { title: '文档' },
+  },
   {
     path: '/memories',
     name: 'memories',
@@ -44,6 +56,13 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   if (to.name !== 'login' && !hasKey()) return { name: 'login' }
+
+  // 角色分区：admin 只在管理台（spaces/users），space 只在业务视图
+  const role = getRole()
+  const adminOnly = ['spaces', 'docs', 'users']
+  const spaceOnly = ['memories', 'logs', 'cards', 'runs', 'recall']
+  if (role === 'admin' && spaceOnly.includes(to.name)) return { name: 'spaces' }
+  if (role === 'space' && adminOnly.includes(to.name)) return { name: 'memories' }
   return true
 })
 
