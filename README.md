@@ -1,6 +1,10 @@
-# gleanmem
+# GleanMem · 拾忆
 
-面向多 Agent 的**外挂记忆与学习服务**。不绑定任何 Agent 框架，四种接入方式并存：
+> **Glean what matters · 拾起重要的。**
+
+**glean**（拾穗）+ **memory**（记忆）——给多智能体做的**外挂长期记忆**。把散落在对话与事件里的重要信息一点一点拾起来，沉淀成可溯源、可审计的长期记忆。
+
+面向多 Agent 的记忆与学习服务，不绑定任何 Agent 框架，四种接入方式并存：
 
 | 接入方 | 方式 |
 |--------|------|
@@ -21,7 +25,7 @@
 - **记错了怎么办** —— LLM 归纳出的"知识"可能是幻觉
 - **人的修正会不会被自动更新覆盖**
 
-这个服务针对这三点做设计。
+GleanMem 针对这三点做设计。
 
 ---
 
@@ -67,8 +71,8 @@
 ```
                     ┌─────────────────┐
    Dify ───MCP─────▶│                 │
-   DSH  ──REST/MCP─▶│   gleanmem-    │────▶ PostgreSQL（唯一运行时依赖）
-   其他 Agent ─REST─▶│   service       │         ├─ long_term_memories
+   DSH  ──REST/MCP─▶│    GleanMem     │────▶ PostgreSQL（唯一运行时依赖）
+   其他 Agent ─REST─▶│                 │         ├─ long_term_memories
    业务系统 ─推送───▶│                 │         ├─ wiki_documents
                     └─────────────────┘         ├─ pending_events（统一收件箱）
                           │                      └─ learning_logs（审计）
@@ -84,13 +88,13 @@
 
 | 模块 | 职责 |
 |------|------|
-| `backend/src/.../mcp/` | 3 个 MCP 工具 + SSE server + stdio 入口 |
-| `backend/src/.../orchestrator/` | 召回编排与规则重排 |
-| `backend/src/.../core/learning.py` | 学习模型（三种模式） |
-| `backend/src/.../core/long_term/` | 长期记忆存储（含权重衰减） |
-| `backend/src/.../core/wiki/` | Wiki 文档存储（Skill 式 description 匹配） |
-| `backend/src/.../core/codebase/` | 代码库蒸馏（批量 + 增量双轨） |
-| `backend/src/.../api/` | REST 接口（含 per-space API Key 鉴权） |
+| `backend/src/gleanmem/mcp/` | 3 个 MCP 工具 + SSE server + stdio 入口 |
+| `backend/src/gleanmem/orchestrator/` | 召回编排与规则重排 |
+| `backend/src/gleanmem/core/learning.py` | 学习模型（三种模式） |
+| `backend/src/gleanmem/core/long_term/` | 长期记忆存储（含权重衰减） |
+| `backend/src/gleanmem/core/wiki/` | Wiki 文档存储（Skill 式 description 匹配） |
+| `backend/src/gleanmem/core/codebase/` | 代码库蒸馏（批量 + 增量双轨） |
+| `backend/src/gleanmem/api/` | REST 接口（含 per-space API Key 鉴权） |
 | `frontend/` | Vue 3 管理后台（平台管理台 + 空间业务视图） |
 | `dsh/` | DSH 一键接入脚本 + skill |
 
@@ -99,17 +103,17 @@
 ## 目录结构
 
 ```
-yd-agent/
-├── docs/gleanmem/     # 设计文档（01-design 为权威，v3.4）+ 评审记录
+.
+├── docs/gleanmem/            # 设计文档（01-design 为权威）+ 三轮评审记录
 ├── gleanmem/
-│   ├── backend/                # FastAPI 后端（src layout）
+│   ├── backend/              # FastAPI 后端（src layout）
 │   │   ├── src/gleanmem/
-│   │   ├── tests/              # 69 个 pytest 用例（打真实 PG）
-│   │   └── alembic/            # 数据库迁移
-│   ├── frontend/               # Vue 3 + Vite 管理后台
-│   ├── dsh/                    # DSH 一键接入（install.py + skill）
-│   └── docker-compose.yml      # 本地 PostgreSQL（含 zhparser 镜像）
-└── spike/                      # Dify/MCP 验证脚本（非 V1 代码）
+│   │   ├── tests/            # 103 个 pytest 用例（打真实 PG）
+│   │   └── alembic/          # 数据库迁移
+│   ├── frontend/             # Vue 3 + Vite 管理后台
+│   ├── dsh/                  # DSH 一键接入（install.py + skill）
+│   └── docker-compose.yml    # 本地 PostgreSQL（含 zhparser 镜像）
+└── spike/                    # Dify/MCP 验证脚本（非主线代码）
 ```
 
 ---
@@ -150,7 +154,7 @@ Python 3.12+ / FastAPI / SQLAlchemy 2.0 async / PostgreSQL（`tsvector + zhparse
 - 后端实现 **V1 + V1.5a**（批量代码库蒸馏）+ **V1.5b**（事件增量）+ N6 审核过滤，设计文档见 `docs/gleanmem/01-design.md`
 - 平台管理台：**admin key** 登录管理所有空间（创建 / 编辑 / 归档 / 轮换 key），空间业务视图按 space key 隔离
 - 前端 7 页：空间管理 / 文档（Dify + DSH 接入指南）/ 记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览
-- 测试 69 个用例全绿
+- 测试 103 个用例全绿
 - **诚实说明**：这是个人项目，用于验证「Agent 外挂记忆」这套设计思路，未经大规模生产流量验证。设计过程做了三轮递进式评审（找 bug → 找未验证假设 → 质疑根本方向），并据此主动砍掉了部分过度设计的功能。
 
 ---
