@@ -1,4 +1,4 @@
-# yd-memory-service
+# gleanmem
 
 面向多 Agent 的**外挂记忆与学习服务**。不绑定任何 Agent 框架，四种接入方式并存：
 
@@ -67,7 +67,7 @@
 ```
                     ┌─────────────────┐
    Dify ───MCP─────▶│                 │
-   DSH  ──REST/MCP─▶│   yd-memory-    │────▶ PostgreSQL（唯一运行时依赖）
+   DSH  ──REST/MCP─▶│   gleanmem-    │────▶ PostgreSQL（唯一运行时依赖）
    其他 Agent ─REST─▶│   service       │         ├─ long_term_memories
    业务系统 ─推送───▶│                 │         ├─ wiki_documents
                     └─────────────────┘         ├─ pending_events（统一收件箱）
@@ -100,10 +100,10 @@
 
 ```
 yd-agent/
-├── docs/yd-memory-service/     # 设计文档（01-design 为权威，v3.4）+ 评审记录
-├── yd-memory-service/
+├── docs/gleanmem/     # 设计文档（01-design 为权威，v3.4）+ 评审记录
+├── gleanmem/
 │   ├── backend/                # FastAPI 后端（src layout）
-│   │   ├── src/yd_memory_service/
+│   │   ├── src/gleanmem/
 │   │   ├── tests/              # 69 个 pytest 用例（打真实 PG）
 │   │   └── alembic/            # 数据库迁移
 │   ├── frontend/               # Vue 3 + Vite 管理后台
@@ -118,23 +118,23 @@ yd-agent/
 
 ```bash
 # 1. 起 PostgreSQL（含 zhparser 扩展的 PG14 镜像）
-docker compose -f yd-memory-service/docker-compose.yml up -d
+docker compose -f gleanmem/docker-compose.yml up -d
 
 # 2. 后端
-cd yd-memory-service/backend
+cd gleanmem/backend
 uv sync
 cp .env.example .env            # 填数据库与 LLM 配置（可选）
 uv run alembic upgrade head
-uv run uvicorn yd_memory_service.main:app --host 127.0.0.1 --port 8000
+uv run uvicorn gleanmem.main:app --host 127.0.0.1 --port 8000
 
 # 3. 前端（可选）
-cd yd-memory-service/frontend && npm install && npm run dev
+cd gleanmem/frontend && npm install && npm run dev
 ```
 
 测试需要本地 PG 容器运行（用例打真实数据库）：
 
 ```bash
-cd yd-memory-service/backend && uv run pytest
+cd gleanmem/backend && uv run pytest
 ```
 
 ---
@@ -147,7 +147,7 @@ Python 3.12+ / FastAPI / SQLAlchemy 2.0 async / PostgreSQL（`tsvector + zhparse
 
 ## 状态与边界
 
-- 后端实现 **V1 + V1.5a**（批量代码库蒸馏）+ **V1.5b**（事件增量）+ N6 审核过滤，设计文档见 `docs/yd-memory-service/01-design.md`
+- 后端实现 **V1 + V1.5a**（批量代码库蒸馏）+ **V1.5b**（事件增量）+ N6 审核过滤，设计文档见 `docs/gleanmem/01-design.md`
 - 平台管理台：**admin key** 登录管理所有空间（创建 / 编辑 / 归档 / 轮换 key），空间业务视图按 space key 隔离
 - 前端 7 页：空间管理 / 文档（Dify + DSH 接入指南）/ 记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览
 - 测试 69 个用例全绿

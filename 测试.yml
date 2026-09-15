@@ -1,5 +1,5 @@
 app:
-  description: yd-memory-service 记忆增强 Agent
+  description: gleanmem 记忆增强 Agent
   icon: 🧠
   icon_background: '#1C64F2'
   mode: advanced-chat

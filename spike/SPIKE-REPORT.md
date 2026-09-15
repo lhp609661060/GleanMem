@@ -1,6 +1,6 @@
-# yd-memory-service Spike 验证报告
+# gleanmem Spike 验证报告
 
-> 对应 `docs/yd-memory-service/05-solutions.md` 阶段 A（3 天 Spike）
+> 对应 `docs/gleanmem/05-solutions.md` 阶段 A（3 天 Spike）
 
 ## 结论速览
 

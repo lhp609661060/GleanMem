@@ -1,7 +1,7 @@
 # P0-1 Spike: Dify MCP 集成能力验证
 
 **目标**: 用最小 echo MCP Server 验证 Dify 1.13.3 是否满足
-`docs/yd-memory-service/05-solutions.md` P0-1 的六个 checkpoint。
+`docs/gleanmem/05-solutions.md` P0-1 的六个 checkpoint。
 一次性丢弃品,不进 V1 代码库。
 
 ## 环境

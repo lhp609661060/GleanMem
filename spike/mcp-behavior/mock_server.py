@@ -52,7 +52,7 @@ def _snapshot(request: Request) -> dict[str, Any]:
 
 # --- MCP server + 3 tools ------------------------------------------
 
-server: Server = Server("yd-memory-mock")
+server: Server = Server("gleanmem-mock")
 
 
 # Seed some test memories so recall returns something useful.

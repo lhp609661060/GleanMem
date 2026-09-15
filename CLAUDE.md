@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-This repo contains design docs, spike experiments, and a first-cut backend implementation for **yd-memory-service**, a multi-agent external memory platform integrated to Dify (MCP), DSH/other agents (REST), and business systems (push). The referenced `yd-agent` codebase is frozen.
+This repo contains design docs, spike experiments, and a first-cut backend implementation for **gleanmem**, a multi-agent external memory platform integrated to Dify (MCP), DSH/other agents (REST), and business systems (push). The referenced `yd-agent` codebase is frozen.
 
-- `docs/yd-memory-service/01-design.md` is the **authoritative design (v3 rewrite)** — read it before touching code.
-- `yd-memory-service/backend/` implements V1 + V1.5a (batch codebase distillation) + V1.5b (event incremental) + N6 review filtering — v3.4 contract, 54 tests green. **Every 🔴/🟡 in `01-design.md` §实现现状与差距清单 is closed**; only the 🟢 seed.py/Alembic dual-track item and V2 backlog remain.
-- `yd-memory-service/frontend/` is a Vue 3 + Vite admin UI (5 pages), no longer empty — see `frontend/README.md`.
+- `docs/gleanmem/01-design.md` is the **authoritative design (v3 rewrite)** — read it before touching code.
+- `gleanmem/backend/` implements V1 + V1.5a (batch codebase distillation) + V1.5b (event incremental) + N6 review filtering — v3.4 contract, 54 tests green. **Every 🔴/🟡 in `01-design.md` §实现现状与差距清单 is closed**; only the 🟢 seed.py/Alembic dual-track item and V2 backlog remain.
+- `gleanmem/frontend/` is a Vue 3 + Vite admin UI (5 pages), no longer empty — see `frontend/README.md`.
 - `spike/` holds disposable Dify/MCP verification scripts + `SPIKE-REPORT.md` (Spike passed).
 - It is a git repo (branch `main`, Conventional Commits; see `AGENTS.md` for commit/tag conventions). Dev commands (uv, docker compose, alembic, pytest) are documented in `AGENTS.md`.
 
 ## Document set and reading order
 
-All docs live in `docs/yd-memory-service/` and form a single deliberate sequence (see `README.md`):
+All docs live in `docs/gleanmem/` and form a single deliberate sequence (see `README.md`):
 
 | File | Role |
 |------|------|
