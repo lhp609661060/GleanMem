@@ -66,6 +66,18 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": "可选：user | feedback | project | reference",
                 },
+                "source": {
+                    "type": "string",
+                    "description": "可选：事件来源，默认 chat。区分 REST/IM/定时任务等入口，便于后续按来源审计与回放",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "可选：会话 ID，用于把同一对话内多次提交的事件关联起来",
+                },
+                "dedup_key": {
+                    "type": "string",
+                    "description": "可选：去重键，相同 dedup_key 的事件在 flush 时按幂等处理，防止重复提交",
+                },
             },
             "required": ["type", "context"],
         },

@@ -122,11 +122,10 @@ async def test_recall_orchestrator_hides_pending_pattern(make_space):
                    review_status="pending")
         await s.commit()
 
-    async with async_session_factory() as s:
-        result = await recall("发货单怎么处理", agent_id, s)
-        titles = [m["title"] for m in result.memories]
-        assert "发货单人工记录" in titles
-        assert "未审核归纳：发货单规则" not in titles
+    result = await recall("发货单怎么处理", agent_id)
+    titles = [m["title"] for m in result.memories]
+    assert "发货单人工记录" in titles
+    assert "未审核归纳：发货单规则" not in titles
 
 
 # -- 边界：去重比对不受过滤影响 ---------------------------------------------
@@ -203,3 +202,32 @@ async def test_review_rejects_bad_status_and_cross_space(space_client):
     async with _client(key_b) as client:
         r = await client.post(f"/api/v1/memories/{mem_id}/review", json={"status": "approved"})
         assert r.status_code == 404
+
+
+# -- V2-1：recall 三路并发容错 -----------------------------------------------
+
+
+async def test_recall_tolerates_one_path_failure(make_space, monkeypatch):
+    """V2-1：三路并发，wiki 路抛异常时不阻塞 hot/cold，recall 仍返回记忆。
+
+    asyncio.gather(return_exceptions=True) 让异常路降级为空，其余路正常返回——
+    一路失败不至于整体 500，是 V2 并发的核心容错卖点。
+    """
+    from yd_memory_service.core.wiki.db_store import WikiStore
+
+    agent_id = await make_space()
+    async with async_session_factory() as s:
+        await _add(s, agent_id, title="容错测试记忆", review_status="approved")
+        await s.commit()
+
+    # wiki 路炸了
+    async def _boom(self, *a, **kw):
+        raise RuntimeError("wiki store down")
+
+    monkeypatch.setattr(WikiStore, "search", _boom)
+
+    result = await recall("容错", agent_id)
+    # hot/cold 仍工作，记忆返回非空
+    assert result.memories, "wiki 路失败不应拖垮 hot/cold"
+    # wiki 路降级为空列表
+    assert result.wiki_refs == []

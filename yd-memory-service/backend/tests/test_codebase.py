@@ -16,7 +16,7 @@ import pytest
 from httpx import ASGITransport
 from sqlalchemy import select
 
-from yd_memory_service.core.codebase.analyzer import CardDraft
+from yd_memory_service.core.codebase.analyzer import CardDraft, _parse_card_json
 from yd_memory_service.core.codebase.projection import (
     PROTECTED_MARKER,
     module_to_filename,
@@ -356,3 +356,28 @@ async def test_wiki_search_can_filter_by_source(make_space):
         assert no_cb and all(
             d.extra_meta.get("source") != "codebase" for d in no_cb
         )
+
+
+# ---------------------------------------------------------------- E1：codebase card JSON 解析失败可观测
+
+
+def test_parse_card_json_logs_warning_on_invalid_json(caplog):
+    """E1：_parse_card_json 解析失败时打 warning（此前静默返回 None），仍返回 None。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="yd_memory_service.core.codebase.analyzer"):
+        result = _parse_card_json("definitely not json")
+
+    assert result is None
+    assert any("解析失败" in r.message for r in caplog.records)
+
+
+def test_parse_card_json_silent_on_valid(caplog):
+    """E1：合法 JSON 不打 warning，正常返回 dict。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="yd_memory_service.core.codebase.analyzer"):
+        result = _parse_card_json('{"module": "core/发货", "description": "x"}')
+
+    assert result == {"module": "core/发货", "description": "x"}
+    assert not caplog.records

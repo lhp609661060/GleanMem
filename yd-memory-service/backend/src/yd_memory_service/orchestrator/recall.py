@@ -1,16 +1,21 @@
 """RecallOrchestrator — parallel 3-way retrieval + merge + rank.
 
-Not an Agent: no loop, no tool calling, no LLM decisions in V1.
+V2：三路并发（独立 session），延迟 sum→max；一路失败不阻塞另两路。
+Not an Agent: no loop, no tool calling, no LLM decisions.
 """
 
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
+import logging
 
+from yd_memory_service.core.database import async_session_factory
 from yd_memory_service.core.long_term.pg_store import LongTermStore
 from yd_memory_service.core.wiki.db_store import WikiStore
 
 from .ranker import rank_by_relevance
+
+logger = logging.getLogger(__name__)
 
 
 class RecallResult:
@@ -27,15 +32,43 @@ class RecallResult:
         }
 
 
-async def recall(intent: str, agent_id: str, session: AsyncSession) -> RecallResult:
-    mem_store = LongTermStore(session)
-    wiki_store = WikiStore(session)
+async def recall(intent: str, agent_id: str) -> RecallResult:
+    """三路并发检索：hot（高频）/ cold（ts_rank）/ wiki（文档）。
 
-    # 同一 AsyncSession 不支持并发任务（SQLAlchemy async 限制），三路顺序执行；
-    # V1 三路都是毫秒级查询，顺序执行不影响体感。
-    hot = await mem_store.get_hot(agent_id, top_k=20)
-    cold = await mem_store.search(intent, agent_id, top_k=5, with_rank=True)
-    wiki = await wiki_store.search(intent, agent_id, top_k=3)
+    V1 同 AsyncSession 不支持并发任务，三路顺序执行；V2 起独立 session 用
+    asyncio.gather 并发，延迟降为 max(hot,cold,wiki)。只读场景独立 session
+    安全；return_exceptions 容错——一路失败该路返空，merge 仍可用其他路结果，
+    不阻塞整体 recall。
+    """
+    # 三路各自独立 session，互不阻塞
+    async def _hot() -> list:
+        async with async_session_factory() as s:
+            return await LongTermStore(s).get_hot(agent_id, top_k=20)
+
+    async def _cold() -> list:
+        async with async_session_factory() as s:
+            return await LongTermStore(s).search(
+                intent, agent_id, top_k=5, with_rank=True
+            )
+
+    async def _wiki() -> list:
+        async with async_session_factory() as s:
+            return await WikiStore(s).search(intent, agent_id, top_k=3)
+
+    hot, cold, wiki = await asyncio.gather(
+        _hot(), _cold(), _wiki(), return_exceptions=True
+    )
+
+    # 容错：异常路降级为空列表，不影响其余路结果
+    if isinstance(hot, Exception):
+        logger.warning("recall hot 路失败，降级为空: %s", hot)
+        hot = []
+    if isinstance(cold, Exception):
+        logger.warning("recall cold 路失败，降级为空: %s", cold)
+        cold = []
+    if isinstance(wiki, Exception):
+        logger.warning("recall wiki 路失败，降级为空: %s", wiki)
+        wiki = []
 
     # merge by id, hot takes priority；冷路带上 ts_rank 供重排（N5 修复）
     seen = {m.id for m in hot}

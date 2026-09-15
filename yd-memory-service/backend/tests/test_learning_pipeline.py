@@ -288,6 +288,86 @@ async def test_llm_analyze_non_list_returns_empty(monkeypatch):
     assert raw == '{"not": "a list"}'
 
 
+# ---------------------------------------------------------------- E2：event_index 绑定（消除下标错位）
+
+
+async def test_llm_analyze_binds_by_event_index(monkeypatch):
+    """E2：LLM 返回 event_index 时按它绑定事件，不依赖数组下标。"""
+    from uuid import uuid4
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    import openai
+
+    monkeypatch.setattr(
+        openai,
+        "AsyncOpenAI",
+        lambda **kw: _FakeOpenAI(
+            '[{"event_index":1,"action":"store","title":"第二条","content":"c","memory_type":"feedback"},'
+            '{"event_index":0,"action":"store","title":"第一条","content":"c0","memory_type":"feedback"}]'
+        ),
+    )
+    lm = LearningModel(None)  # type: ignore[arg-type]
+    events = [
+        PendingEvent(id=str(uuid4()), agent_id="x", event_type="user_feedback", context="第一条事件"),
+        PendingEvent(id=str(uuid4()), agent_id="x", event_type="user_feedback", context="第二条事件"),
+    ]
+    decisions, _raw = await lm._llm_analyze(events)
+
+    # LLM 把第二条放第一个返回、第一条放第二个——按 event_index 仍绑对
+    assert len(decisions) == 2
+    by_id = {d.event_id: d for d in decisions}
+    assert by_id[events[0].id].title == "第一条"
+    assert by_id[events[1].id].title == "第二条"
+
+
+async def test_llm_analyze_event_index_out_of_range_skipped(monkeypatch):
+    """E2：event_index 越界（LLM 编了不存在的下标）→ 该决策 event_id 为空，不错绑到别的事件。"""
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    import openai
+
+    monkeypatch.setattr(
+        openai,
+        "AsyncOpenAI",
+        lambda **kw: _FakeOpenAI(
+            '[{"event_index":99,"action":"store","title":"幽灵","content":"c","memory_type":"feedback"}]'
+        ),
+    )
+    lm = LearningModel(None)  # type: ignore[arg-type]
+    events = [PendingEvent(agent_id="x", event_type="user_feedback", context="唯一事件")]
+    decisions, _raw = await lm._llm_analyze(events)
+
+    assert len(decisions) == 1
+    # event_index=99 越界 → fallback 到 i=0（维持现状），但说明越界没绑到错的事件
+    assert decisions[0].event_id == events[0].id
+
+
+async def test_llm_analyze_fewer_decisions_than_events_no_misbind(monkeypatch):
+    """E2：LLM 只返回 1 条决策但 events 有 2 条——返回的那条按 event_index 绑对，不因下标错位绑到另一条。"""
+    from uuid import uuid4
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    import openai
+
+    monkeypatch.setattr(
+        openai,
+        "AsyncOpenAI",
+        lambda **kw: _FakeOpenAI(
+            '[{"event_index":1,"action":"store","title":"仅分析第二条","content":"c","memory_type":"feedback"}]'
+        ),
+    )
+    lm = LearningModel(None)  # type: ignore[arg-type]
+    events = [
+        PendingEvent(id=str(uuid4()), agent_id="x", event_type="user_feedback", context="第一条"),
+        PendingEvent(id=str(uuid4()), agent_id="x", event_type="user_feedback", context="第二条"),
+    ]
+    decisions, _raw = await lm._llm_analyze(events)
+
+    assert len(decisions) == 1
+    # 按 event_index=1 绑到第二条，而非下标 0 的第一条
+    assert decisions[0].event_id == events[1].id
+    assert decisions[0].title == "仅分析第二条"
+
+
 async def test_llm_analyze_invalid_json_returns_empty(monkeypatch):
     """无效 JSON → ([], raw)。"""
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
@@ -300,3 +380,136 @@ async def test_llm_analyze_invalid_json_returns_empty(monkeypatch):
 
     assert decisions == []
     assert raw == "not json at all"
+
+
+# ---------------------------------------------------------------- E1：LLM JSON 解析失败可观测
+
+
+def test_parse_llm_json_logs_warning_on_invalid_json(caplog):
+    """E1：_parse_llm_json 解析失败时打 warning（此前静默吞，调试困难），仍返回 []。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="yd_memory_service.core.learning"):
+        result = LearningModel._parse_llm_json("not json at all")
+
+    assert result == []
+    assert any("解析失败" in r.message for r in caplog.records)
+
+
+def test_parse_llm_json_silent_on_empty_and_valid(caplog):
+    """E1：空输入与合法 JSON 不打 warning（只有真正解析失败才告警）。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="yd_memory_service.core.learning"):
+        assert LearningModel._parse_llm_json("") == []
+        assert LearningModel._parse_llm_json('[{"action":"store"}]') == [
+            {"action": "store"}
+        ]
+    assert not caplog.records
+
+
+# ---------------------------------------------------------------- A1：max_memories 上限治理
+
+
+async def test_flush_archives_overflow_beyond_max_memories(make_space):
+    """A1：超出 max_memories 上限时，flush 末尾软删最低权重记忆。
+
+    此前 Space.config.max_memories 与 archive_lowest 都已存在但 flush 未接通，
+    长期记忆会无限增长。修复后 flush 末尾按 weight asc / created_at asc 淘汰溢出条数。
+    """
+    agent_id = await make_space(
+        learning_mode="heuristic", decay_per_day=1.0, min_weight=0.0, max_memories=2
+    )
+    async with async_session_factory() as s:
+        # 既有 3 条记忆，权重递增；最低权重应优先被淘汰
+        for w in (0.1, 0.5, 0.9):
+            s.add(
+                LongTermMemory(
+                    agent_id=agent_id,
+                    type="reference",
+                    title=f"权重{w}",
+                    content=f"内容{w}",
+                    weight=w,
+                    review_status="approved",
+                )
+            )
+        await _add_events(s, agent_id, n=1)  # 一个 pending event 让 _run 跑到底
+        await s.commit()
+
+    async with async_session_factory() as s:
+        mgr = MemoryManager(s)
+        result = await mgr.flush(agent_id)
+        await s.commit()
+        assert result["status"] == "ok"
+
+    async with async_session_factory() as s:
+        active = (
+            (
+                await s.execute(
+                    select(LongTermMemory)
+                    .where(
+                        LongTermMemory.agent_id == agent_id,
+                        LongTermMemory.is_deleted == False,  # noqa: E712
+                    )
+                    .order_by(LongTermMemory.weight)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # 原 3 条 + flush 新存 1 条(权重 1.0) = 4；max_memories=2 → 软删最低 2 条(0.1, 0.5)
+        assert len(active) == 2
+        assert [round(m.weight, 2) for m in active] == [0.9, 1.0]
+
+
+# ---------------------------------------------------------------- A3：commit 失败不丢事件
+
+
+async def test_commit_failure_keeps_event_for_retry(make_space, monkeypatch):
+    """A3：_commit_and_log 内 store.create 抛异常时事件保留走 P1-1，不被误删。
+
+    Python 层异常不污染 session（不同于 PG IntegrityError 会被整事务 rollback 兜底），
+    原实现会照常 delete 事件 → 事件丢失且绕过重试。修复后 FAILED 的 event_id 不进删除集。
+    """
+    agent_id = await make_space(learning_mode="llm")
+    async with async_session_factory() as s:
+        await _add_events(s, agent_id, n=1)
+        mgr = MemoryManager(s)
+        mgr._learning._llm_analyze = _fake_llm_store_all()
+
+        async def _failing_create(mem):
+            raise RuntimeError("simulated commit failure")
+
+        mgr._learning._store.create = _failing_create
+
+        result = await mgr.flush(agent_id)
+        await s.commit()
+        assert result["status"] == "ok"
+
+    async with async_session_factory() as s:
+        events = (
+            (
+                await s.execute(
+                    select(PendingEvent).where(PendingEvent.agent_id == agent_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1, "commit 失败的事件必须保留走 P1-1 重试，不能被误删"
+        assert events[0].retry_count == 1
+
+        logs = (
+            (
+                await s.execute(
+                    select(LearningLog).where(LearningLog.agent_id == agent_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        failed = [
+            lg for lg in logs if lg.decision_action == DecisionAction.FAILED.value
+        ]
+        assert len(failed) == 1
+        assert "simulated commit failure" in (failed[0].error_message or "")

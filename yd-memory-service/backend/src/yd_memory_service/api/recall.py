@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from yd_memory_service.core.database import get_db
+from yd_memory_service.core.metrics import timed_recall
 from yd_memory_service.orchestrator.recall import recall as orchestrator_recall
 
 from .deps import require_agent
@@ -20,8 +19,11 @@ class RecallRequest(BaseModel):
 async def recall_endpoint(
     body: RecallRequest,
     agent_id: str = Depends(require_agent),
-    db: AsyncSession = Depends(get_db),
 ):
-    """HTTP 集成用，与 MCP recall 工具等价；agent_id 取自 key。"""
-    result = await orchestrator_recall(body.intent, agent_id, db)
+    """HTTP 集成用，与 MCP recall 工具等价；agent_id 取自 key。
+
+    V2：recall 内部起独立 session 并发三路，端点不再持有 db 依赖。
+    """
+    with timed_recall():
+        result = await orchestrator_recall(body.intent, agent_id)
     return result.to_dict()

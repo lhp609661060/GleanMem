@@ -75,3 +75,43 @@ async def test_archive_invalidates_key(space_client):
         # 归档后原 key 访问任何受保护接口都 401
         assert (await client.get("/api/v1/spaces")).status_code == 401
         assert (await client.get("/api/v1/memories")).status_code == 401
+
+
+# ---------------------------------------------------------------- C3：GET /me 去冗余
+
+
+async def test_get_my_space_uses_caller_no_path_param(space_client):
+    """C3：GET /api/v1/spaces/me 用 caller_id 查自己，无需传 path agent_id。
+
+    此前 GET /{agent_id} 的 path 参数冗余（必须等于 caller）。/me 直接用
+    key 解析的 caller_id，调用方更简单且无 path 伪造面。
+    """
+    key, agent_id = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as client:
+        r = await client.get("/api/v1/spaces/me")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["agent_id"] == agent_id
+        # _space_dict 契约：绝不外泄 api_key_hash，只暴露 prefix
+        assert "api_key_hash" not in body
+        assert "api_key_prefix" in body
+
+
+async def test_get_my_space_requires_auth(space_client):
+    """C3：/me 同样要求 space_key 鉴权，无 key → 401。"""
+    await space_client()
+    async with _client() as client:
+        r = await client.get("/api/v1/spaces/me")
+        assert r.status_code == 401
+
+
+async def test_get_me_not_swallowed_by_path_route(space_client):
+    """C3：/me 路由必须在 /{agent_id} 之前声明，否则会被当 agent_id='me' 匹配。
+
+    验证 /me 不会被 /{agent_id} 吞掉——返回的是真 Space 而非 404。
+    """
+    key, agent_id = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as client:
+        r = await client.get("/api/v1/spaces/me")
+        assert r.status_code == 200
+        assert r.json()["agent_id"] == agent_id

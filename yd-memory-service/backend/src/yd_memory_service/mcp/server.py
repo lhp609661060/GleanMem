@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 from typing import Any
 
 from mcp import types
@@ -45,7 +46,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list:
 
         try:
             if name == "recall":
-                result = await recall(arguments.get("intent", ""), aid, session)
+                result = await recall(arguments.get("intent", ""), aid)
                 return [types.TextContent(type="text", text=json.dumps(result.to_dict(), ensure_ascii=False, indent=2))]
 
             elif name == "load_memory":
@@ -55,14 +56,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list:
                 return [types.TextContent(type="text", text=text)]
 
             elif name == "memorize":
-                event = await mgr.memorize(agent_id=aid, event_type=arguments.get("type", "agent_mark"), context=arguments.get("context", ""), marked_type=arguments.get("marked_type"))
+                event = await mgr.memorize(
+                    agent_id=aid,
+                    event_type=arguments.get("type", "agent_mark"),
+                    context=arguments.get("context", ""),
+                    marked_type=arguments.get("marked_type"),
+                    source=arguments.get("source", "chat"),
+                    session_id=arguments.get("session_id"),
+                    dedup_key=arguments.get("dedup_key"),
+                )
                 await session.commit()
                 return [types.TextContent(type="text", text=json.dumps({"status": "submitted", "event_id": event.id, "message": "已提交，对话结束后统一分析处理"}, ensure_ascii=False))]
 
             else:
                 return [types.TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}, ensure_ascii=False))]
         except Exception as exc:
-            import traceback, logging
+            import traceback
             logging.getLogger("ydm.mcp").error("Tool %s failed: %s\n%s", name, exc, traceback.format_exc())
             await session.rollback()
             return [types.TextContent(type="text", text=json.dumps({"error": str(exc)}, ensure_ascii=False))]
@@ -74,10 +83,19 @@ sse_transport = SseServerTransport("/messages/")
 
 
 async def handle_sse(request: Request) -> Response:
-    aid = request.headers.get("X-Agent-ID", "MISSING")
+    # 身份不变式：缺失 X-Agent-ID 直接拒绝建立 SSE，绝不用占位串写脏数据。
+    aid = request.headers.get("X-Agent-ID", "").strip()
+    if not aid:
+        logging.getLogger("ydm.mcp").warning("MCP SSE rejected: missing X-Agent-ID")
+        return Response(
+            content=json.dumps(
+                {"error": "X-Agent-ID header 未设置"}, ensure_ascii=False
+            ),
+            media_type="application/json",
+            status_code=401,
+        )
     _agent_id.set(aid)
-    import logging
-    logging.getLogger("ydm.mcp").warning("MCP SSE agent_id=%s headers=%s", aid, dict(request.headers))
+    logging.getLogger("ydm.mcp").debug("MCP SSE connected agent_id=%s", aid)
     async with sse_transport.connect_sse(
         request.scope, request.receive, request._send
     ) as (read_stream, write_stream):

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yd_memory_service.config import settings
 
+from .metrics import metrics
 from .long_term.pg_store import LongTermStore
 from .models.learning_log import LearningLog
 from .models.long_term_memory import LongTermMemory
@@ -69,11 +70,13 @@ class LearningModel:
         learning_mode: str,
         decay_per_day: float = 0.95,
         min_weight: float = 0.1,
+        max_memories: int = 0,
     ) -> list[MemoryDecision] | None:
         """Flush pipeline: acquire lock → fetch events → analyse → commit → log.
 
         Returns None when another flush for the same agent_id holds the lock
         (caller should surface this as a "skipped" status).
+        max_memories <= 0 视为不限制；> 0 时 flush 末尾软删溢出条数。
         """
 
         # 1. Acquire advisory lock (non-blocking)
@@ -87,7 +90,9 @@ class LearningModel:
             return None
 
         try:
-            return await self._run(agent_id, learning_mode, decay_per_day, min_weight)
+            return await self._run(
+                agent_id, learning_mode, decay_per_day, min_weight, max_memories
+            )
         finally:
             await self._s.execute(
                 text("SELECT pg_advisory_unlock(hashtext(:key))"),
@@ -100,6 +105,7 @@ class LearningModel:
         learning_mode: str,
         decay_per_day: float,
         min_weight: float,
+        max_memories: int = 0,
     ) -> list[MemoryDecision]:
         # 2. SELECT … FOR UPDATE
         stmt = (
@@ -145,7 +151,9 @@ class LearningModel:
                         chat_events[0].session_id, learning_mode,
                         d.raw_response or chat_raw, "chat",
                     )
-                    if d.event_id:
+                    # 只删除成功提交的：FAILED（含 commit 失败）必须保留走 P1-1 重试，
+                    # 否则 Python 层异常会丢事件（PG 层异常由整事务 rollback 兜底侥幸安全）。
+                    if d.event_id and d.action != DecisionAction.FAILED:
                         decided_ids.add(d.event_id)
                 if decided_ids:
                     await self._s.execute(
@@ -171,10 +179,14 @@ class LearningModel:
                         d, agent_id, "observation", obs_events[0].session_id,
                         learning_mode, d.raw_response or obs_raw, "observation",
                     )
-                obs_ids = [e.id for e in obs_events]
-                await self._s.execute(
-                    delete(PendingEvent).where(PendingEvent.id.in_(obs_ids))
-                )
+                # 整批绑定语义：任一 commit 失败则整批保留走 P1-1 重试，不删除事件
+                if any(d.action == DecisionAction.FAILED for d in ds):
+                    await self._handle_undecided(obs_events, agent_id, obs_raw, learning_mode)
+                else:
+                    obs_ids = [e.id for e in obs_events]
+                    await self._s.execute(
+                        delete(PendingEvent).where(PendingEvent.id.in_(obs_ids))
+                    )
             processed += ds
 
         # codebase 分支（V1.5b）：指纹 diff → 单模块重生成，产物是 wiki 知识卡
@@ -183,6 +195,15 @@ class LearningModel:
 
         # 6. Decay weights（读 Space 配置，不再硬编码）
         await self._store.decay_weights(agent_id, decay_per_day, min_weight)
+
+        # 7. 上限治理：超出 max_memories 时软删最低权重记忆（配置项此前未接通）
+        if max_memories > 0:
+            archived = await self._store.archive_overflow(agent_id, max_memories)
+            if archived:
+                logger.info(
+                    "Space %s memory overflow: archived %d (limit=%d)",
+                    agent_id, archived, max_memories,
+                )
 
         return processed
 
@@ -343,7 +364,8 @@ class LearningModel:
         )
 
         events_text = "\n".join(
-            f"- [{e.event_type}] {e.context[:300]}" for e in events
+            f"[{i}] type={e.event_type} | {e.context[:300]}"
+            for i, e in enumerate(events)
         )
 
         raw = ""
@@ -356,8 +378,10 @@ class LearningModel:
                         "content": (
                             "You are a memory analysis assistant. For each event, "
                             "decide: store (long-term memory), discard (not useful), "
-                            "or merge (similar to existing). Return JSON array:\n"
-                            '[{"action":"store|discard|merge","title":"...","content":"...","memory_type":"reference|feedback|project|user"}]'
+                            "or merge (similar to existing). Return JSON array. "
+                            "Each item MUST include event_index (the [N] prefix of "
+                            "the event it analyzes) so it can be bound back reliably:\n"
+                            '[{"event_index":0,"action":"store|discard|merge","title":"...","content":"...","memory_type":"reference|feedback|project|user"}]'
                         ),
                     },
                     {"role": "user", "content": events_text},
@@ -366,6 +390,13 @@ class LearningModel:
                 max_tokens=1000,
             )
             raw = resp.choices[0].message.content or ""
+            # D4：上报 LLM token 消耗（部分 provider 不返 usage，缺失则记 0）
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                metrics.observe_llm_tokens(
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0,
+                )
         except Exception:
             logger.exception("LLM analysis failed; keeping events for retry")
             return [], raw
@@ -383,7 +414,16 @@ class LearningModel:
                 memory_type = MemoryType(item.get("memory_type", "reference"))
             except ValueError:
                 memory_type = MemoryType.REFERENCE
-            event = events[i] if i < len(events) else None
+            # E2：优先按 LLM 返回的 event_index 绑定事件，避免数组下标错位
+            # （LLM 漏一个/多一个/重排时，enumerate 下标会绑错事件）。
+            # LLM 未返回 event_index 时 fallback 到 enumerate 下标（维持现状，不退化）。
+            idx = item.get("event_index")
+            if isinstance(idx, int) and 0 <= idx < len(events):
+                event = events[idx]
+            elif i < len(events):
+                event = events[i]
+            else:
+                event = None
             decisions.append(
                 MemoryDecision(
                     action=action,
@@ -400,13 +440,16 @@ class LearningModel:
     def _parse_llm_json(raw: str) -> list:
         """Strip ```json fences and parse; non-list → []."""
         text = raw.strip()
+        if not text:
+            return []
         if text.startswith("```"):
             text = text.removeprefix("```json").removeprefix("```").strip()
             if text.endswith("```"):
                 text = text[:-3].strip()
         try:
             parsed = json.loads(text)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLM JSON 解析失败，按 P1-1 返回空决策：%s", exc)
             return []
         return parsed if isinstance(parsed, list) else []
 
@@ -486,6 +529,13 @@ class LearningModel:
                 max_tokens=1000,
             )
             raw = resp.choices[0].message.content or ""
+            # D4：上报 LLM token 消耗（部分 provider 不返 usage，缺失则记 0）
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                metrics.observe_llm_tokens(
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0,
+                )
         except Exception:
             logger.exception("Observation LLM analysis failed; keeping events for retry")
             return [], raw

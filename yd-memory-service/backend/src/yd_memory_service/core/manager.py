@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yd_memory_service.config import settings
 
 from .learning import LearningModel
+from .metrics import timed_flush
 from .long_term.pg_store import LongTermStore
 from .models.agent_space import AgentSpace
 from .models.pending_event import PendingEvent
@@ -101,9 +102,13 @@ class MemoryManager:
         min_weight = float(
             space.config.get("min_weight", settings.default_min_weight)
         )
-        decisions = await self._learning.run_pipeline(
-            agent_id, mode, decay_per_day, min_weight
+        max_memories = int(
+            space.config.get("max_memories", settings.default_max_memories)
         )
+        with timed_flush():
+            decisions = await self._learning.run_pipeline(
+                agent_id, mode, decay_per_day, min_weight, max_memories
+            )
         if decisions is None:
             return {"status": "skipped", "reason": "another_flush_running"}
         return {

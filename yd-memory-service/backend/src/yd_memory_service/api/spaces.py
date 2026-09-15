@@ -76,12 +76,32 @@ async def list_spaces(
     return [_space_dict(space)] if space else []
 
 
+@router.get("/me")
+async def get_my_space(
+    caller_id: str = Depends(require_agent),
+    db: AsyncSession = Depends(get_db),
+):
+    """查当前 Space（去冗余：直接用 caller_id，不暴露 path 参数）。
+
+    caller_id 已从 space_key 解析得到，path agent_id 本就必须等于 caller，
+    传它是冗余。新调用方优先用 /me；旧 GET /{agent_id} 保留向后兼容。
+    """
+    space = await db.get(AgentSpace, caller_id)
+    if not space:
+        raise HTTPException(404, "Space not found")
+    return _space_dict(space)
+
+
 @router.get("/{agent_id}")
 async def get_space(
     agent_id: str,
     caller_id: str = Depends(require_agent),
     db: AsyncSession = Depends(get_db),
 ):
+    """查指定 Space（向后兼容）。path agent_id 必须等于 caller，否则 404。
+
+    .. deprecated:: 优先用 GET /me——path agent_id 冗余（必须等于 caller）。
+    """
     if agent_id != caller_id:
         raise HTTPException(404, "Space not found")
     space = await db.get(AgentSpace, agent_id)

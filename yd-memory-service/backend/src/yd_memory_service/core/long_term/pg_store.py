@@ -244,3 +244,36 @@ class LongTermStore:
         )
         result = await self._s.execute(stmt)
         return result.rowcount
+
+    async def archive_overflow(self, agent_id: str, max_memories: int) -> int:
+        """超过 max_memories 上限时，软删最低权重的溢出条数。
+
+        max_memories <= 0 视为不限制。同权重按 created_at 升序（先建的先淘汰）。
+        返回被软删的条数。配合 Space.config.max_memories 在 flush 末尾调用。
+        """
+        if max_memories <= 0:
+            return 0
+        total = await self.count(agent_id)
+        if total <= max_memories:
+            return 0
+
+        overflow = total - max_memories
+        subq = (
+            select(LongTermMemory.id)
+            .where(
+                LongTermMemory.agent_id == agent_id,
+                LongTermMemory.is_deleted == False,
+            )
+            .order_by(
+                LongTermMemory.weight.asc(), LongTermMemory.created_at.asc()
+            )
+            .limit(overflow)
+        ).scalar_subquery()
+
+        stmt = (
+            update(LongTermMemory)
+            .where(LongTermMemory.id.in_(subq))
+            .values(is_deleted=True, review_status="deprecated")
+        )
+        result = await self._s.execute(stmt)
+        return result.rowcount

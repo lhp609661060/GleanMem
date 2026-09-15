@@ -78,13 +78,16 @@ def build_module_source(module: ScannedModule, repo_root: str) -> str:
 def _parse_card_json(raw: str) -> dict | None:
     """剥离围栏 + 解析；非 dict → None（同 learning.py 的解析纪律）。"""
     text = raw.strip()
+    if not text:
+        return None
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").strip()
         if text.endswith("```"):
             text = text[:-3].strip()
     try:
         parsed = json.loads(text)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM card JSON 解析失败，跳过该模块：%s", exc)
         return None
     return parsed if isinstance(parsed, dict) else None
 

@@ -104,3 +104,31 @@ async def review_memory(
             and mem.review_status == ReviewStatus.PENDING
         ),
     }
+
+
+@router.delete("/{memory_id}")
+async def delete_memory(
+    memory_id: str,
+    agent_id: str = Depends(require_agent),
+    db: AsyncSession = Depends(get_db),
+):
+    """软删记忆（撤销/清理）：标记 is_deleted + review_status=deprecated。
+
+    软删后记忆不再参与召回、不再出现在列表，但行保留以备审计。
+    归属校验按 agent_id，不能删别的 Space 的记忆。
+    """
+    result = await db.execute(
+        select(LongTermMemory).where(
+            LongTermMemory.id == memory_id,
+            LongTermMemory.agent_id == agent_id,
+            LongTermMemory.is_deleted == False,  # noqa: E712
+        )
+    )
+    mem = result.scalar_one_or_none()
+    if mem is None:
+        raise HTTPException(status_code=404, detail="记忆不存在或不属于当前 Space")
+
+    mem.is_deleted = True
+    mem.review_status = ReviewStatus.DEPRECATED.value
+    await db.commit()
+    return {"id": mem.id, "is_deleted": True}
