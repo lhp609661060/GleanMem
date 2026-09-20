@@ -27,11 +27,20 @@ from gleanmem.config import settings
 from gleanmem.core.database import engine
 from gleanmem.core.metrics import metrics
 from gleanmem.mcp.server import mcp_app
+from gleanmem.orchestrator.scheduler import (
+    catch_up_on_startup,
+    start_scheduler,
+    stop_scheduler,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    scheduler = start_scheduler()
+    if scheduler:
+        await catch_up_on_startup()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(

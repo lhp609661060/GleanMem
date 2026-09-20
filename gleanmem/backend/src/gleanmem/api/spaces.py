@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gleanmem.core.database import get_db
 from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models.agent_space import AgentSpace
+from gleanmem.orchestrator.scheduler import InvalidSchedule, normalize_cron
 
 from .deps import require_agent, resolve_identity
 
@@ -120,6 +121,13 @@ async def update_space(
     role, caller_id = identity
     if role == "space" and agent_id != caller_id:
         raise HTTPException(404, "Space not found")
+    # 写入即校验：非法 cron 挡在 API 边界，不等运行时被静默跳过。
+    # 空串放行——它是「取消调度」的写法（config 浅合并删不掉键）。
+    if body.config and body.config.get("schedule"):
+        try:
+            normalize_cron(str(body.config["schedule"]))
+        except InvalidSchedule as exc:
+            raise HTTPException(422, str(exc)) from exc
     space = await db.get(AgentSpace, agent_id)
     if not space:
         raise HTTPException(404, "Space not found")
@@ -129,6 +137,10 @@ async def update_space(
         space.description = body.description
     if body.config is not None:
         # 浅合并：传入的键覆盖，未传入的键保留（decay/min_weight/max_memories/learning_mode 各自独立）
+        if "schedule" in body.config and body.config["schedule"] != space.config.get(
+            "schedule"
+        ):
+            space.last_fired_slot = None  # 换周期就丢掉旧槽位，新 cron 立刻生效
         space.config = {**space.config, **body.config}
     await db.commit()
     return _space_dict(space)

@@ -40,7 +40,7 @@
 - **接入**：MCP SSE（X-Agent-ID，Dify）+ REST（per-space API Key，DSH/业务系统）
 - **检索**：RecallOrchestrator 并行三路（热记忆权重 + 冷记忆 tsvector + wiki tsvector），纯函数非 Agent
 - **工具**：3 个 MCP 工具（recall / load_memory / memorize），`query_db` 已删除
-- **学习**：4 类需求共用知识收件箱，source（chat/example/observation）× trigger（webhook-flush/cron）正交
+- **学习**：4 类需求共用知识收件箱，source（chat/example/observation）× trigger（webhook-flush/cron）正交。cron 侧 V2 已内置（Space 级 `config.schedule`，不依赖外部 crontab）
 - **观察**：push-first，业务方推事件（幂等 + 溯源 + 审计）；pull 推迟到其他项目、以 producer 回融
 - **代码库蒸馏**：V1.5 候选主线——batch 全量（不走收件箱）+ event 增量（走收件箱）+ `protected` 修订保护 + 双层产物（叙述层 md 给人读 + 知识卡进服务）
 - **Wiki**：走 Skill 机制（description + 按需加载），V1 就做

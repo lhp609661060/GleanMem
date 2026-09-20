@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import String, Text, Float, Integer, text
+from datetime import datetime
+
+from sqlalchemy import String, Text, DateTime, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +26,14 @@ class AgentSpace(Base, TimestampMixin):
     config: Mapped[dict] = mapped_column(
         JSONB,
         default=lambda: {"decay_per_day": 0.95, "min_weight": 0.1, "max_memories": 5000, "learning_mode": "heuristic"},
+    )
+    last_fired_slot: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        comment="最近一次已触发的 cron 槽（分钟粒度 YYYY-MM-DDTHH:MM），多副本/重启去重",
+    )
+    last_scheduled_flush: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="最近一次调度 flush 完成时间"
     )
     status: Mapped[str] = mapped_column(
         String(20), default="active", server_default=text("'active'")

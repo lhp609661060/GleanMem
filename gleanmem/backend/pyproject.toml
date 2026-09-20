@@ -20,6 +20,8 @@ dependencies = [
     "starlette>=0.40",
     "httpx>=0.28",
     "openai>=1.0", # for LearningModel LLM mode
+    "APScheduler>=3.10", # V2 内置调度器（纯进程内，不引入外部服务）
+    "croniter>=2.0", # Space 级 cron 表达式判定
 ]
 
 [tool.setuptools.packages.find]

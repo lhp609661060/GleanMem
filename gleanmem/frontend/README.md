@@ -1,6 +1,6 @@
 # gleanmem 管理端
 
-Vue 3 + Vite 的管理前端，5 个页面覆盖后端全部能力。**只读 + 审核**，不做数据录入（录入走 REST / MCP / CLI）。
+Vue 3 + Vite 的管理前端。**业务视图只读 + 审核**，不做数据录入（录入走 REST / MCP / CLI）；唯一可写的是 admin 侧的「空间管理」（建/改/归档 Space，含 V2 调度 cron 配置）。
 
 ## 起服务
 
@@ -36,6 +36,7 @@ cd ../backend && uv run python scripts/seed_demo_space.py
 | 代码库知识卡 | 蒸馏产出的知识卡、`protected` 修订保护、md 待 sync 状态 | V1.5 双层产物、D11 |
 | 蒸馏审计 | `codebase_runs` 的 run 级审计（有效/排除文件数、token、保护跳过次数） | D12 |
 | 检索预览 | 与 MCP `recall` 等价的三路召回结果 | 检索侧 |
+| 空间管理（admin） | 创建/编辑/归档 Space；编辑表单含 **schedule**（5 段 cron）与启用开关，列表「调度」列显示下次触发时刻 | V2 内置调度器 |
 
 ## 最值得看的一幕（N6 闭环）
 

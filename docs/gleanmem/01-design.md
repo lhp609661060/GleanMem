@@ -12,6 +12,8 @@
 >
 > **v3.4 修订记录**（2026-08）：N6 关闭——召回层落地 `review_status` 分级过滤（pattern 必须 approved、flagged/deprecated 全类型排除），补审核端点。**差距清单全部 🔴/🟡 已关闭**，剩余仅 🟢 seed.py 双轨与 V2 backlog。
 >
+> **v3.5 修订记录**（2026-09）：差距清单 🟢 全清（删除 `seed.py`，建表唯一入口为 alembic）；P0-3 在重建库上复验通过（Top3 20/20 = 100%、p95 20.8ms）→ **pgvector 判定为无需排期**；V2 唯一无前置条件项「内置调度器」落地（Space 级 cron + `last_fired_slot` 原子占槽做多副本互斥、`catch_up` 补跑窗口）；124 测试绿。
+>
 > **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
 >
 > **v3.2 修订记录**（2026-08，V1 验收后、V1.5 开工前）：V1 全部 🔴/🟡 差距关闭（23 测试绿、P0-3 100%）；闭环 V1.5 的 5 个开工前设计点 —— 叙述层 md 定为知识卡的**单向投影**（D11）、新增 `codebase_runs` **run 级审计**表（D12）、新增独立 `/api/v1/codebase/*` 端点（D13）、CodebaseAnalyzer 模型与 token 硬预算（D14）。
@@ -73,7 +75,7 @@ yd-agent 项目已冻结代码开发。四层记忆体系 + LLM 驱动学习模�
 | trigger | 含义 | 实现 |
 |---------|------|------|
 | `webhook-flush` | 会话/业务动作结束时 | 外部调 `POST /api/v1/learning/flush`（Dify 工作流结尾节点、业务系统回调） |
-| `cron` | 定时批量（需求 d） | V1：外部 cron 调 flush；V2：内置调度器 |
+| `cron` | 定时批量（需求 d） | V1：外部 cron 调 flush；V2：内置调度器 ✅ 已实现（2026-09） |
 
 ### 三维度组合（需求 → 设计映射）
 
@@ -296,7 +298,12 @@ V1 不做 pull（连接业务库、快照 diff），该能力在其他项目单�
 ### d. 定时任务学习（trigger，不是 source）
 
 - **V1**：外部 cron 定时调 `POST /api/v1/learning/flush`（带 API Key），对积压素材批量分析。示例：每日凌晨对昨天的 observation 事件跑蒸馏。
-- **V2**：内置调度器（APScheduler），Space 配置 `schedule` 字段（cron 表达式），按 Space 独立调度。
+- **V2**：内置调度器（APScheduler），Space 配置 `schedule` 字段（cron 表达式），按 Space 独立调度。✅ **已实现**（2026-09，`orchestrator/scheduler.py`）：
+  - `config.schedule`（5 段 cron，服务器本地时区）+ `config.schedule_enabled`（暂停）+ `config.catch_up`（重启补跑，受 `YDM_SCHEDULER_CATCHUP_WINDOW_MINUTES` 窗口约束，默认 720 分钟）。写入即由 `PUT /api/v1/spaces/{id}` 校验，非法表达式 422 拒绝。
+  - **无 jobstore**：APScheduler 只做「每 20s 一次 tick」，到不到点由 croniter 对着 DB 判定 → Space 增删改不必同步 job 列表，也就没有 resync 端点这一类额外 machinery。
+  - **多副本互斥**：`agent_spaces.last_fired_slot`（分钟粒度槽位）由单条原子 `UPDATE ... WHERE last_fired_slot IS DISTINCT FROM :slot` 抢占，抢不到就跳过；Space 内部另有 flush 的 advisory lock 兜底。
+  - **可观测**：`last_scheduled_flush` 记完成时间，`GET /api/v1/learning/schedules` 返回 cron 合法性、下次触发时刻、最近触发槽位（响应带 `cron_timezone`，因为 cron 是本地时间而时间戳存 UTC）。
+  - **管理台**：「空间管理」编辑表单可填 schedule 与启用开关，列表「调度」列显示下次触发时刻；`schedule: ""` 表示取消调度（config 浅合并删不掉键）。
 - d 与 b/c 的组合就是「定时归纳样例」「定时蒸馏观察」——trigger 与 source 正交的价值所在。
 
 ---
@@ -671,9 +678,10 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 
 ### V2（视需求）
 
+- ~~内置调度器（Space 级 cron）~~ ✅ 已实现（2026-09，见 §定时任务学习：Space 级 cron + 原子槽位多副本互斥 + `GET /learning/schedules` 观测；`scripts/e2e_scheduler_demo.py` 9 步端到端，无需外部 crontab、无需 LLM key）
+- ~~pgvector 语义检索（若 zhparser 召回不达标）~~ ✅ **判定为不做**：P0-3 在 v3.5 新库上复验，Top3 命中 20/20 = 100%（阈值 ≥40%）、p95 20.8ms（阈值 <100ms），前置条件不成立；且引入 pgvector 会破坏「PostgreSQL 唯一依赖」不变式
 - pull producer 回融（在其他项目积累成熟后）
-- 内置调度器（Space 级 cron）
-- pgvector 语义检索（若 zhparser 召回不达标）
+- 样例学习剩余部分（pattern 归纳，视资源实施）
 - ~~管理前端 2 页 + 学习日志页~~ ✅ 已提前实现（2026-08，超出原计划：5 页 Vue 3 + Vite——记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览。N6 审核闭环可视化演示）
 
 ---
@@ -697,7 +705,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 | 🟡 | **N6：`review_status` 从未参与召回过滤**（审核流装饰性，V1.5 pattern 上线必返工） | `pg_store.py:48-115` ✅ 已修复（2026-08：`review_conditions()` 分级过滤——flagged/deprecated 全类型排除、pattern 必须 approved、其他类型 pending 即可召回；`get_hot`/`search` 接入，去重比对显式关闭过滤；补 review 审核端点；9 用例锁定，含反向验证） |
 | 🟡 | `query_db` 工具及其实现待删除（D3） | `mcp/tools.py:73-90`、`mcp/server.py:61-62,75-98` ✅ 已删除（day 6-7，回到 3 工具；asyncpg 双连接随之移除） |
 | 🟡 | REST 无鉴权、无 agent_id 隔离；flush 由 body 传 `agent_id`（违反身份不变式） | `api/spaces.py`、`api/webhooks.py:13-20` ✅ 已修复（Week 2：`api/deps.py` require_agent 中间件 + 全路由 Bearer 鉴权 + flush 改 key 解析身份，webhooks.py 并入 learning.py 后删除） |
-| 🟢 | 无 `backend/tests/`；`seed.py` 与 Alembic 双轨建表需统一 | — ✅ 测试已建（day 3-5：`tests/` 12 用例全绿，覆盖 P1-1/审计/衰减/解析/锁/ranker；pytest 需 session 级 loop 配置；seed.py 双轨仍未处理） |
+| 🟢 | 无 `backend/tests/`；`seed.py` 与 Alembic 双轨建表需统一 | — ✅ 测试已建（day 3-5：`tests/` 12 用例全绿，覆盖 P1-1/审计/衰减/解析/锁/ranker；pytest 需 session 级 loop 配置）；✅ **双轨已清**（2026-09 删除 `backend/seed.py`——建表唯一入口是 `alembic upgrade head`，造数据用 `scripts/seed_demo_space.py` 或 pytest fixture，不再有两份 schema 定义） |
 
 ---
 
@@ -732,7 +740,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 V1.5a（约 1.5-2 周）：batch 全量 + `protected` 修订保护 + 双层产物 + `codebase_runs` 审计（可独立演示）；V1.5b（约 1-1.5 周）：event 增量。开工前的 md/知识卡一致性、batch 审计日志、codebase 入站端点三个设计点已闭环（D11-D13，另 D14 定成本上限）。样例学习降级为下游 pattern 归纳。
 
 ### V2
-业务观察 pull producer 回融、内置调度器、pgvector、管理前端、样例学习剩余部分。
+内置调度器 ✅ 已实现（2026-09）；管理前端 ✅ 提前实现；pgvector ✅ 判定为不做（P0-3 复验 100%）。剩余：业务观察 pull producer 回融、样例学习剩余部分（pattern 归纳）。
 
 ---
 

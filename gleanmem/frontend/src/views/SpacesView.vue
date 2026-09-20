@@ -12,6 +12,8 @@ const spaces = ref([])
 const loading = ref(false)
 const error = ref('')
 const info = ref('')
+// agent_id -> 调度状态（cron 合法性 / 下次触发），来自 /learning/schedules
+const schedules = ref({})
 
 // 创建
 const creating = ref(false)
@@ -27,12 +29,23 @@ const editLearningMode = ref('heuristic')
 const editDecay = ref('0.95')
 const editMinWeight = ref('0.1')
 const editMaxMemories = ref('5000')
+const editSchedule = ref('')
+const editScheduleEnabled = ref(true)
+const cronTimezone = ref('')
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
     spaces.value = await api.listSpaces()
+    // 调度状态取不到不影响主列表（老后端 / 无权限时静默降级为「—」）
+    try {
+      const res = await api.listSchedules()
+      schedules.value = Object.fromEntries(res.items.map((i) => [i.agent_id, i]))
+      cronTimezone.value = res.cron_timezone || ''
+    } catch {
+      schedules.value = {}
+    }
   } catch (e) {
     error.value = e.message
   } finally {
@@ -81,6 +94,8 @@ function startEdit(s) {
   editDecay.value = String(c.decay_per_day ?? 0.95)
   editMinWeight.value = String(c.min_weight ?? 0.1)
   editMaxMemories.value = String(c.max_memories ?? 5000)
+  editSchedule.value = c.schedule || ''
+  editScheduleEnabled.value = c.schedule_enabled !== false
 }
 
 function cancelEdit() {
@@ -95,6 +110,9 @@ async function saveEdit() {
     decay_per_day: parseFloat(editDecay.value),
     min_weight: parseFloat(editMinWeight.value),
     max_memories: parseInt(editMaxMemories.value, 10),
+    // 空串 = 取消调度（后端 config 是浅合并，删不掉键，用空串表达清除）
+    schedule: editSchedule.value.trim(),
+    schedule_enabled: editScheduleEnabled.value,
   }
   if ([config.decay_per_day, config.min_weight, config.max_memories].some(Number.isNaN)) {
     error.value = '数值字段格式不正确'
@@ -144,6 +162,11 @@ async function enter(s) {
 
 function statusClass(st) {
   return st === 'active' ? 'ok' : 'danger'
+}
+
+// croniter 给出的是服务器本地时间，与 created_at（UTC）不同源，故只截断展示、不做换算
+function fmtFire(iso) {
+  return iso ? iso.replace('T', ' ').slice(0, 16) : '—'
 }
 
 onMounted(load)
@@ -216,6 +239,24 @@ onMounted(load)
       <label style="color: var(--muted); min-width: 120px">max_memories</label>
       <input v-model="editMaxMemories" type="number" step="1" min="1" style="width: 130px" />
     </div>
+    <div class="row" style="margin-bottom: 4px">
+      <label style="color: var(--muted); min-width: 120px">schedule</label>
+      <input
+        v-model="editSchedule"
+        class="mono"
+        placeholder="0 3 * * *（留空 = 不自动学习）"
+        style="width: 240px"
+      />
+      <label style="color: var(--muted); display: flex; align-items: center; gap: 6px">
+        <input v-model="editScheduleEnabled" type="checkbox" :disabled="!editSchedule.trim()" />
+        启用
+      </label>
+    </div>
+    <p class="muted" style="font-size: 12px; margin: 0 0 10px">
+      5 段 cron（分 时 日 月 周），按服务器时区
+      <span v-if="cronTimezone" class="mono">{{ cronTimezone }}</span>；
+      到点自动 flush 该 Space 的收件箱。表达式非法会被后端拒绝。
+    </p>
     <div class="row">
       <button class="primary" @click="saveEdit">保存</button>
       <button @click="cancelEdit">取消</button>
@@ -231,6 +272,7 @@ onMounted(load)
           <th>状态</th>
           <th>key 前缀</th>
           <th>agent_id</th>
+          <th>调度</th>
           <th>创建时间</th>
           <th>操作</th>
         </tr>
@@ -244,6 +286,33 @@ onMounted(load)
           <td><span class="badge" :class="statusClass(s.status)">{{ s.status }}</span></td>
           <td class="mono">{{ s.api_key_prefix }}…</td>
           <td class="mono truncate" style="max-width: 180px">{{ s.agent_id }}</td>
+          <td style="font-size: 12px">
+            <div v-if="schedules[s.agent_id]" class="mono">
+              {{ schedules[s.agent_id].cron }}
+              <span
+                class="badge"
+                :class="
+                  schedules[s.agent_id].valid
+                    ? schedules[s.agent_id].enabled ? 'ok' : ''
+                    : 'danger'
+                "
+                style="margin-left: 6px"
+              >
+                {{
+                  schedules[s.agent_id].valid
+                    ? schedules[s.agent_id].enabled ? '启用' : '已暂停'
+                    : '表达式非法'
+                }}
+              </span>
+            </div>
+            <div v-if="schedules[s.agent_id]?.valid" class="muted">
+              下次 {{ fmtFire(schedules[s.agent_id].next_fire_at) }}
+            </div>
+            <div v-else-if="schedules[s.agent_id]" class="muted">
+              {{ schedules[s.agent_id].error }}
+            </div>
+            <span v-else class="muted">—</span>
+          </td>
           <td class="mono" style="font-size: 12px">{{ s.created_at }}</td>
           <td>
             <div class="row" style="gap: 6px">

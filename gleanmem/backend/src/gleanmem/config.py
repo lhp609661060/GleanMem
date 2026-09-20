@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # 平台管理台 admin key（YDM_ADMIN_KEY）；为空则禁用平台管理（管理台/用户管理）
     admin_key: str = ""
 
+    # 内置调度器（V2）：Space 级 cron 自动 flush
+    scheduler_enabled: bool = True
+    scheduler_tick_seconds: int = 20  # 判定粒度是分钟，20s 足够且不空转
+    scheduler_catchup_window_minutes: int = 720  # 补跑只回看这么久
+
     # Defaults for new Agent Spaces
     default_max_memories: int = 5000
     default_decay_per_day: float = 0.95

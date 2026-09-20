@@ -62,7 +62,12 @@ async function request(path, { method = 'GET', body } = {}) {
     let detail = `${res.status} ${res.statusText}`
     try {
       const data = await res.json()
-      if (data.detail) detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)
+      if (data.detail) {
+        // FastAPI 422 的 detail 是数组，人话在每项 msg 里（如 cron 校验失败的原因）
+        detail = Array.isArray(data.detail)
+          ? data.detail.map((d) => d.msg || JSON.stringify(d)).join('；')
+          : data.detail
+      }
     } catch {
       /* 响应非 JSON，沿用状态码 */
     }
@@ -92,6 +97,8 @@ export const api = {
   listLogs: (page = 1) => request(`/learning/logs?page=${page}`),
   flush: () => request('/learning/flush', { method: 'POST' }),
   submitEvent: (payload) => request('/learning/events', { method: 'POST', body: payload }),
+  // 内置调度器状态（V2）：每个带 cron 的 Space 的下次触发 / 最近触发
+  listSchedules: () => request('/learning/schedules'),
 
   // 检索（与 MCP recall 等价）
   recall: (intent) => request('/recall', { method: 'POST', body: { intent } }),
