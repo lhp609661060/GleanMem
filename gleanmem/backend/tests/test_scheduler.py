@@ -267,7 +267,7 @@ async def test_put_space_rejects_invalid_cron(space_client):
 
 
 async def test_put_space_can_clear_schedule(space_client):
-    """config 是浅合并、删不掉键，故空串是「取消调度」的唯一写法，且必须真的停掉。"""
+    """空串是同义旧写法（管理台仍用它），语义与 null 一致：真的停掉调度。"""
     key, agent_id = await space_client()
     async with _client(key) as c:
         assert (
@@ -278,6 +278,27 @@ async def test_put_space_can_clear_schedule(space_client):
         r = await c.put(f"/api/v1/spaces/{agent_id}", json={"config": {"schedule": ""}})
         assert r.status_code == 200, r.text
         assert r.json()["config"]["schedule"] == ""
+        assert (await c.get("/api/v1/learning/schedules")).json()["items"] == []
+
+
+async def test_put_space_null_removes_config_key(space_client):
+    """null 删键：取消调度的规范写法，键彻底消失而非留空串哨兵。"""
+    key, agent_id = await space_client()
+    async with _client(key) as c:
+        assert (
+            await c.put(
+                f"/api/v1/spaces/{agent_id}",
+                json={"config": {"schedule": "0 3 * * *", "catch_up": True}},
+            )
+        ).status_code == 200
+        r = await c.put(
+            f"/api/v1/spaces/{agent_id}",
+            json={"config": {"schedule": None, "catch_up": None}},
+        )
+        assert r.status_code == 200, r.text
+        cfg = r.json()["config"]
+        assert "schedule" not in cfg and "catch_up" not in cfg, "null 必须删键"
+        assert cfg["decay_per_day"] == 0.95, "未传入的键必须保留"
         assert (await c.get("/api/v1/learning/schedules")).json()["items"] == []
 
 

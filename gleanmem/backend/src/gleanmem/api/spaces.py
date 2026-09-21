@@ -39,7 +39,7 @@ class SpaceCreate(BaseModel):
 
 
 class SpaceUpdate(BaseModel):
-    """更新请求体：只改传入的字段；config 为浅合并（不整体覆盖）。"""
+    """更新请求体：只改传入的字段；config 为按键合并——值为 null 的键会被删除。"""
 
     name: str | None = None
     description: str | None = None
@@ -122,7 +122,7 @@ async def update_space(
     if role == "space" and agent_id != caller_id:
         raise HTTPException(404, "Space not found")
     # 写入即校验：非法 cron 挡在 API 边界，不等运行时被静默跳过。
-    # 空串放行——它是「取消调度」的写法（config 浅合并删不掉键）。
+    # null / 空串都放行——它们是「删键 / 取消调度」的写法（见下方合并语义）。
     if body.config and body.config.get("schedule"):
         try:
             normalize_cron(str(body.config["schedule"]))
@@ -136,12 +136,17 @@ async def update_space(
     if body.description is not None:
         space.description = body.description
     if body.config is not None:
-        # 浅合并：传入的键覆盖，未传入的键保留（decay/min_weight/max_memories/learning_mode 各自独立）
-        if "schedule" in body.config and body.config["schedule"] != space.config.get(
-            "schedule"
-        ):
-            space.last_fired_slot = None  # 换周期就丢掉旧槽位，新 cron 立刻生效
-        space.config = {**space.config, **body.config}
+        # 合并语义：传入的键覆盖，值为 null 的键删除（取消调度 = {"schedule": null}）；
+        # 空串是同义旧写法，保留兼容——调度器与 /schedules 都把空 schedule 当无调度。
+        merged = dict(space.config)
+        for key, value in body.config.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        if merged.get("schedule", "") != space.config.get("schedule", ""):
+            space.last_fired_slot = None  # 换周期（含取消）就丢掉旧槽位，新 cron 立刻生效
+        space.config = merged
     await db.commit()
     return _space_dict(space)
 
