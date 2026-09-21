@@ -13,7 +13,11 @@ from gleanmem.core.database import get_db
 from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models.agent_space import AgentSpace
 from gleanmem.core.models.learning_log import LearningLog
-from gleanmem.orchestrator.scheduler import InvalidSchedule, normalize_cron
+from gleanmem.orchestrator.scheduler import (
+    InvalidSchedule,
+    normalize_cron,
+    schedule_enabled,
+)
 
 from .deps import require_agent, resolve_identity
 
@@ -99,7 +103,7 @@ async def list_schedules(
                     "name": space.name,
                     "cron": expr,
                     "valid": False,
-                    "enabled": (space.config or {}).get("schedule_enabled", True) is not False,
+                    "enabled": schedule_enabled(space.config),
                     "error": str(exc),
                     "next_fire_at": None,
                 }
@@ -111,7 +115,7 @@ async def list_schedules(
                 "name": space.name,
                 "cron": expr,
                 "valid": True,
-                "enabled": (space.config or {}).get("schedule_enabled", True) is not False,
+                "enabled": schedule_enabled(space.config),
                 "next_fire_at": croniter(expr, now).get_next(datetime).isoformat(),
                 "last_fired_slot": space.last_fired_slot,
                 "last_scheduled_flush": (

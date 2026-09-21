@@ -62,6 +62,22 @@ def test_slot_of_is_minute_granular():
     assert slot_of(NOW) == "2026-09-20T03:00"
 
 
+@pytest.mark.parametrize(
+    "value, enabled",
+    [
+        (True, True),
+        (False, False),
+        ("false", False),  # JSONB 可被 curl 写成字符串，"false" 必须真的暂停
+        ("0", False),
+        ("true", True),
+    ],
+)
+def test_schedule_enabled_normalizes_jsonb_values(value, enabled):
+    assert scheduler.schedule_enabled({"schedule_enabled": value}) is enabled
+    assert scheduler.schedule_enabled({}) is True, "缺省即启用"
+    assert scheduler.schedule_enabled(None) is True
+
+
 # ------------------------------------------------------------------ 占槽
 
 
@@ -117,6 +133,30 @@ async def test_one_space_failure_does_not_block_others(make_space, monkeypatch):
     assert by_agent[good]["status"] == "ok", "失败不应中断整批"
 
 
+async def test_failed_slot_is_not_retried(make_space, monkeypatch):
+    """at-most-once 契约：占槽先于执行，flush 失败不回退槽位、后续 tick 不重跑。
+
+    事件留在收件箱由下一批兜住，最坏是延迟；换来 LLM 故障期间无重试风暴。
+    把这里"修"成重试属于回归，先读 scheduler 模块 docstring。
+    """
+    agent_id = await make_space(schedule="0 3 * * *")
+    calls: list[str] = []
+
+    async def failing(agent_id: str, expr: str) -> dict:
+        calls.append(agent_id)
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(scheduler, "fire_flush", failing)
+    results = await run_due_flushes(NOW)
+    assert results[0]["status"] == "error"
+    assert await run_due_flushes(NOW + timedelta(seconds=30)) == []
+    assert calls == [agent_id], "失败后不得重跑同一槽位"
+
+    async with async_session_factory() as s:
+        space = await s.get(AgentSpace, agent_id)
+        assert space.last_fired_slot == slot_of(NOW), "失败后槽位必须保持占用"
+
+
 async def test_fire_flush_writes_observability_fields(make_space):
     """真跑一次 fire_flush：pending_events 被蒸馏、last_scheduled_flush 落库。"""
     from gleanmem.core.manager import MemoryManager
@@ -170,6 +210,20 @@ async def test_catch_up_skips_spaces_without_flag(make_space, monkeypatch):
     assert calls == [agent_id]
     # 已补跑过，再来一次不重复
     assert await catch_up_on_startup(datetime(2026, 9, 20, 3, 6)) == []
+
+
+async def test_catch_up_skips_paused_space(make_space, monkeypatch):
+    """暂停（schedule_enabled=false）优先于补跑：catch_up=true 也不该在启动时触发。"""
+    agent_id = await make_space(
+        schedule="0 3 * * *", catch_up=True, schedule_enabled=False
+    )
+
+    async def record(agent_id: str, expr: str) -> dict:
+        return {"agent_id": agent_id, "status": "ok"}
+
+    monkeypatch.setattr(scheduler, "fire_flush", record)
+    assert await catch_up_on_startup(datetime(2026, 9, 20, 3, 5)) == []
+    assert agent_id
 
 
 async def test_catch_up_ignores_slots_outside_window(make_space, monkeypatch):

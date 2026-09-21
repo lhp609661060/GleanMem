@@ -9,6 +9,9 @@
   对 DB 里的 schedule 判定。Space 增删改不必同步 job 列表，因此不需要 resync 端点。
 - **多副本互斥**：抢到 `last_fired_slot` 的那一份才执行（单条原子 UPDATE），其余副本
   见槽位已占即跳过；Space 内部另有 flush 的 advisory lock 兜底。
+- **每槽至多执行一次（at-most-once）**：占槽先于执行，flush 失败也不回退槽位、不重试。
+  事件仍留在收件箱由下一批 flush 兜住，最坏是延迟不是丢失；换取的是 LLM 故障期间
+  不会每个 tick 重试风暴。改这个语义前先看 test_failed_slot_is_not_retried。
 - **重启补跑**：`config.catch_up=true` 时，启动后补看最近一个应当触发的分钟点，
   且在 `settings.scheduler_catchup_window_minutes` 窗口内才补——无限回溯会让一次
   周五重启补跑几周前的批次。
@@ -28,6 +31,8 @@ from gleanmem.core.models.agent_space import AgentSpace
 
 logger = logging.getLogger(__name__)
 
+# 零填充 ISO 分钟。catch_up 的 `last_fired_slot >= slot` 依赖其字典序 == 时间序，
+# 且整体假定服务器时区稳定（换 TZ 槽位会跳变）——改格式即断这两条。
 SLOT_FORMAT = "%Y-%m-%dT%H:%M"
 
 
@@ -72,6 +77,18 @@ def is_due(expr: str, now: datetime, last_fired_slot: str | None) -> str | None:
         return None
     slot = slot_of(moment)
     return None if last_fired_slot == slot else slot
+
+
+def schedule_enabled(config: dict | None) -> bool:
+    """`config.schedule_enabled` 的唯一读法：默认真；显式 false 才暂停。
+
+    JSONB 可被 curl 写入字符串，`is False` 挡不住 "false"，故在此统一归一化，
+    调度判定与 GET /schedules 展示共用（勿在别处再写第三种判法）。
+    """
+    value = (config or {}).get("schedule_enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "")
+    return bool(value)
 
 
 async def _scheduled_spaces() -> list[AgentSpace]:
@@ -135,7 +152,7 @@ async def run_due_flushes(now: datetime | None = None) -> list[dict]:
     results: list[dict] = []
     for space in await _scheduled_spaces():
         config = space.config or {}
-        if config.get("schedule_enabled", True) is False:
+        if not schedule_enabled(config):
             continue
         expr = _valid_or_none(str(config.get("schedule", "")))
         if not expr:
@@ -166,6 +183,8 @@ async def catch_up_on_startup(now: datetime | None = None) -> list[dict]:
     results: list[dict] = []
     for space in await _scheduled_spaces():
         config = space.config or {}
+        if not schedule_enabled(config):
+            continue  # 暂停的 Space 连补跑也不该触发——此前只看 catch_up 标志，是个漏洞
         if config.get("catch_up") is not True:
             continue
         expr = _valid_or_none(str(config.get("schedule", "")))

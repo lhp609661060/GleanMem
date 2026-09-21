@@ -12,7 +12,7 @@
 >
 > **v3.4 修订记录**（2026-08）：N6 关闭——召回层落地 `review_status` 分级过滤（pattern 必须 approved、flagged/deprecated 全类型排除），补审核端点。**差距清单全部 🔴/🟡 已关闭**，剩余仅 🟢 seed.py 双轨与 V2 backlog。
 >
-> **v3.5 修订记录**（2026-09）：差距清单 🟢 全清（删除 `seed.py`，建表唯一入口为 alembic）；P0-3 在重建库上复验通过（Top3 20/20 = 100%、p95 20.8ms）→ **pgvector 判定为无需排期**；V2 唯一无前置条件项「内置调度器」落地（Space 级 cron + `last_fired_slot` 原子占槽做多副本互斥、`catch_up` 补跑窗口）；124 测试绿。
+> **v3.5 修订记录**（2026-09）：差距清单 🟢 全清（删除 `seed.py`，建表唯一入口为 alembic）；P0-3 在重建库上复验通过（Top3 20/20 = 100%、p95 20.8ms）→ **pgvector 判定为无需排期**；V2 唯一无前置条件项「内置调度器」落地（Space 级 cron + `last_fired_slot` 原子占槽做多副本互斥、`catch_up` 补跑窗口）；131 测试绿。
 >
 > **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
 >
@@ -302,6 +302,7 @@ V1 不做 pull（连接业务库、快照 diff），该能力在其他项目单�
   - `config.schedule`（5 段 cron，服务器本地时区）+ `config.schedule_enabled`（暂停）+ `config.catch_up`（重启补跑，受 `YDM_SCHEDULER_CATCHUP_WINDOW_MINUTES` 窗口约束，默认 720 分钟）。写入即由 `PUT /api/v1/spaces/{id}` 校验，非法表达式 422 拒绝。
   - **无 jobstore**：APScheduler 只做「每 20s 一次 tick」，到不到点由 croniter 对着 DB 判定 → Space 增删改不必同步 job 列表，也就没有 resync 端点这一类额外 machinery。
   - **多副本互斥**：`agent_spaces.last_fired_slot`（分钟粒度槽位）由单条原子 `UPDATE ... WHERE last_fired_slot IS DISTINCT FROM :slot` 抢占，抢不到就跳过；Space 内部另有 flush 的 advisory lock 兜底。
+  - **每槽至多执行一次**：占槽先于执行，flush 失败不回退槽位、不重试——事件留在收件箱由下一批兜住，最坏是延迟不是丢失，换取 LLM 故障期间无重试风暴。暂停语义由 `schedule_enabled()` 统一判定（JSONB 字符串 `"false"` 也生效），且暂停优先于补跑。
   - **可观测**：`last_scheduled_flush` 记完成时间，`GET /api/v1/learning/schedules` 返回 cron 合法性、下次触发时刻、最近触发槽位（响应带 `cron_timezone`，因为 cron 是本地时间而时间戳存 UTC）。
   - **管理台**：「空间管理」编辑表单可填 schedule 与启用开关，列表「调度」列显示下次触发时刻；`schedule: ""` 表示取消调度（config 浅合并删不掉键）。
 - d 与 b/c 的组合就是「定时归纳样例」「定时蒸馏观察」——trigger 与 source 正交的价值所在。
