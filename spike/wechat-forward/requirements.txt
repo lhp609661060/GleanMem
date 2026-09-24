@@ -1,0 +1,5 @@
+# macOS 微信 4.x 转发验证 · 固定依赖（均在本机验证可用）
+# Python 3.13
+frida==16.7.19        # hook CommonCrypto 提取 SQLCipher key（须 <17）
+pycryptodome==3.23.0  # SQLCipher 解密 + V2 图片 AES 解码
+playwright==1.63.0    # 页面真实操作（建 Space / 初始化记忆）

@@ -32,21 +32,24 @@ Agent 行为走真实 REST HTTP（`Authorization: Bearer <space_key>`），不�
 ## 目录
 
 ```
-wxread/            可复用的 macOS 微信 4.x 读取层
-  paths.py           路径发现
-  keyextract.py      Frida 提取 DB key + kvcomm 派生图片 key
-  decrypt.py         SQLCipher 4 分页解密
-  imagedecode.py     V2 图片容器解码（缩略图 JPEG / 原图 wxgf）
-  align.py           文本相似度 + 图片内容哈希对齐
-  agent.py           转发预测 Agent（接 GleanMem）
-  gleanmem_client.py GleanMem REST 客户端
+.venv/              工作区独立环境（固定，不依赖 /tmp）
+requirements.txt    固定依赖版本
+wxread/             可复用的 macOS 微信 4.x 读取层
+  paths.py            路径发现
+  keyextract.py       Frida 提取 DB key + kvcomm 派生图片 key
+  decrypt.py          SQLCipher 4 分页解密
+  imagedecode.py      V2 图片容器解码（缩略图 JPEG / 原图 wxgf）
+  align.py            文本相似度 + 图片内容哈希对齐
+  agent.py            转发预测 Agent（接 GleanMem）
+  gleanmem_client.py  GleanMem REST 客户端（业务 + 管理员）
 scripts/
-  export_groups.py   一键导出 A/B 文本+图片
-  save_images.py     图片解码落盘
-  run_align.py       生成转发对
-  init_memory.py     页面操作初始化原始记忆
-  backtest.py        时间切片回测
-output/             数据集、转发对、回测明细（运行生成）
+  setup.sh            一键建 .venv + 装依赖 + 装浏览器
+  export_groups.py    一键导出 A/B 文本+图片
+  save_images.py      图片解码落盘
+  run_align.py        生成转发对
+  init_memory.py      页面操作初始化原始记忆
+  backtest.py         幂等时间切片回测（自动建/归档临时 Space）
+output/              数据集、密钥、转发对、回测明细（gitignore，含隐私）
 ```
 
 ## 复现步骤
@@ -58,18 +61,30 @@ cd gleanmem/backend && uv run alembic upgrade head
 uv run uvicorn gleanmem.main:app --port 8000 &
 cd ../frontend && npm run dev          # http://localhost:5173
 
-# 1. 导出微信数据（微信须在运行；首次取 key 需打开会话/群详情触发解密）
+# 1. 固定环境（一次性；之后都用工作区 .venv，不依赖 /tmp）
 cd spike/wechat-forward
-/tmp/wxkeywork/f16/bin/python scripts/export_groups.py
-/tmp/wxkeywork/f16/bin/python scripts/save_images.py
+bash scripts/setup.sh
 
-# 2. 对齐
-/tmp/wxkeywork/f16/bin/python scripts/run_align.py
+# 2. 导出微信数据（微信须在运行；首次取 key 需打开会话/群详情触发解密）
+.venv/bin/python scripts/export_groups.py
+.venv/bin/python scripts/save_images.py
 
-# 3. 页面初始化记忆 + 回测（Space/key 由页面创建后写入 output/）
-/tmp/wxkeywork/pw/bin/python scripts/init_memory.py
-/tmp/wxkeywork/f16/bin/python scripts/backtest.py
+# 3. 对齐
+.venv/bin/python scripts/run_align.py
+
+# 4. 页面初始化记忆（可选）+ 幂等回测
+.venv/bin/python scripts/init_memory.py
+.venv/bin/python scripts/backtest.py          # --keep 可保留临时 Space 到前端查看
 ```
+
+## 可重复性
+
+- **环境固定**：依赖装进工作区 `.venv`，版本锁在 `requirements.txt`（frida 16.7.19 /
+  pycryptodome 3.23.0 / playwright 1.63.0），重启机器后直接可用，无需 /tmp。
+- **回测幂等**：`backtest.py` 每次运行自动归档同名旧 Space、新建干净 Space，
+  训练 → 测试结束后再自动归档；多次运行不会累积旧案例。
+- 无记忆基线结果**完全确定**；有记忆组在极少量“边界分”消息上可能因 FTS 检索的
+  排序产生 1 条差异（F1 ±0.03），属小样本边界现象，不影响整体结论。
 
 ## 对齐结果（ground truth）
 
