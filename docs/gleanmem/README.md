@@ -13,6 +13,8 @@
 | [05-solutions.md](./05-solutions.md) | 问题解决与验证手册 | **动手前必读** — 逐个问题的解决方案 |
 | [06-repo-wiki-research.md](./06-repo-wiki-research.md) | 需求反馈：Qoder Repo Wiki 调研与对照 | 调研细节 — 已纳入 01-design **v3.1** §代码库蒸馏（V1.5 候选主线） |
 | [07-architect-review.md](./07-architect-review.md) | v3.1 架构评审报告（差距核验 + 新发现 + 开工顺序） | **动手前必读** — 开工依据 |
+| [08-memory-governance.md](./08-memory-governance.md) | 行业记忆模块调研核实 + V3 记忆治理层设计（QA Gate / 命中率 / 版本回滚） | **V3 必读** — 竞品对照与借鉴清单（09 审计后重新定位为研究备忘） |
+| [09-overdesign-audit.md](./09-overdesign-audit.md) | 过度设计审计：底座克制、周边轻度过度，分级整改建议 | **诊断** — 是否过度设计的结论 |
 
 ## 快速索引
 
@@ -46,3 +48,4 @@
 - **Wiki**：走 Skill 机制（description + 按需加载），V1 就做
 - **依赖**：只依赖 PostgreSQL（不用 Redis）
 - **前端**：V1 只做 2 页（Space 管理 + 记忆列表）
+- **V3 治理层**（[08](./08-memory-governance.md)）：自动 QA Gate（规则 + LLM 两档）、命中率埋点、版本快照与回滚——❄️ 已冻结为备选方案（[09](./09-overdesign-audit.md) 审计），待真实用户/流量/事故触发再立项

@@ -1,4 +1,4 @@
-# gleanmem：多智能体外挂记忆平台（v3.1）
+# gleanmem：多智能体外挂记忆平台（v3.8）
 
 > **版本说明**：v3 是对 v2 的产品方向重写；v3.1 在 v3 冻结范围上，把 06 调研的 codebase 蒸馏纳入为正式候选方向。v2 的检索、存储、审计设计大部分保留，变化集中在四处：
 > 1. **定位**：从「Dify 专用插件」→「多智能体（Dify / DSH / 其他）共享的外挂记忆平台」
@@ -13,6 +13,12 @@
 > **v3.4 修订记录**（2026-08）：N6 关闭——召回层落地 `review_status` 分级过滤（pattern 必须 approved、flagged/deprecated 全类型排除），补审核端点。**差距清单全部 🔴/🟡 已关闭**，剩余仅 🟢 seed.py 双轨与 V2 backlog。
 >
 > **v3.5 修订记录**（2026-09）：差距清单 🟢 全清（删除 `seed.py`，建表唯一入口为 alembic）；P0-3 在重建库上复验通过（Top3 20/20 = 100%、p95 20.8ms）→ **pgvector 判定为无需排期**；V2 唯一无前置条件项「内置调度器」落地（Space 级 cron + `last_fired_slot` 原子占槽做多副本互斥、`catch_up` 补跑窗口）；132 测试绿。
+>
+> **v3.6 修订记录**（2026-09）：行业记忆模块调研（Mem0/Graphiti/Letta/MemOS/A-Mem/Hermes 等，事实已联网核实）沉淀为 [08-memory-governance.md](./08-memory-governance.md)：① 能力对照与借鉴清单（持续有效）；② V3 治理层备选设计——自动 QA Gate（规则 + LLM Judge 两档）、命中率埋点、版本快照与回滚。补决策 D15。**不换底座、不引入新运行时依赖**。
+>
+> **v3.7 修订记录**（2026-09）：经 [09-overdesign-audit.md](./09-overdesign-audit.md) 审计，**V3 治理层冻结、不进入实施**——项目无真实用户/流量消费这些能力，提前实现即过度设计。08 重新定位为「研究备忘 + 备选方案」，待真实触发条件（外部用户 / 召回流量 / 改坏事故）出现再逐项立项。
+>
+> **v3.8 修订记录**（2026-09）：落实审计 P2——**llm 学习模式降级为实验开关**：默认 heuristic，llm 模式标注「未经基准验证更优」，代码保留但停止为其增加 prompt/契约复杂度；去留待未来 A/B（llm vs heuristic 命中率）决定。前端下线 Logs/Runs/Recall 三个低频视图（文件保留）。
 >
 > **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
 >
@@ -36,6 +42,7 @@
 | D12 | 新增 `codebase_runs` 表做 **run 级审计**（不是逐卡决策级） | batch 是生成而非学习决策，不走收件箱 → 须补审计链，使「卡 → run → commit SHA → 文件」可 trace |
 | D13 | 新增独立 `/api/v1/codebase/*` 端点，**不复用 observations** | 事件结构不同，硬塞会污染 observation 分析器契约（07 评审 §5.2 建议） |
 | D14 | CodebaseAnalyzer 用既有 `YDM_LLM_*` 模型 + Space 级 token 硬预算 + dry-run 先报后跑 | 不新增供应商依赖；防一次全量烧光演示预算（07 评审 §5.4） |
+| D15 | 行业调研沉淀为 [08-memory-governance.md](./08-memory-governance.md)：能力对照/借鉴清单持续有效；V3 治理层（QA Gate + 命中率埋点 + 版本快照）**仅作备选设计** | 调研核实：拾忆审批能力已属第一梯队；治理能力以 PG 表 + 既有 LLM 配置即可补齐薄壳，不追随 Graphiti/Letta/MemOS 底座范式，守住 PG-only。**但无真实消费者前不实施（09 审计冻结）** |
 
 ---
 
@@ -203,6 +210,8 @@ CREATE INDEX idx_pending_agent ON pending_events(agent_id, created_at);
 ### a. 聊天框主喂养（V1，现状已基本覆盖）
 
 Agent 在对话中调用 `memorize` 提交值得长期记住的信息 → 写入收件箱（`source=chat`）→ 会话结束 webhook 触发 flush → LearningModel 三模式（llm / heuristic / direct，默认 heuristic）分析入库。
+
+> **模式定位（09 审计 P2，2026-09）**：**heuristic 是默认且推荐模式；llm 模式为实验开关**——目前没有基准证明 llm 归纳的命中率优于启发式，且延迟/成本不可控。llm 代码与 `llm_raw_response` 审计保留，但**不再为它增加 prompt 或契约复杂度**；未来有真实流量后做 A/B（llm vs heuristic 命中率与成本），用数据决定去留。
 
 **与 v2 的差距只有一个**：v2 的触发绑死 Dify 工作流。v3 中 flush 是标准 REST 接口 + API Key，**任何平台**（DSH 编排的 Agent 结束回调、业务系统回调）都能触发，Dify 只是其中一个调用方。
 
@@ -683,6 +692,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 - ~~pgvector 语义检索（若 zhparser 召回不达标）~~ ✅ **判定为不做**：P0-3 在 v3.5 新库上复验，Top3 命中 20/20 = 100%（阈值 ≥40%）、p95 20.8ms（阈值 <100ms），前置条件不成立；且引入 pgvector 会破坏「PostgreSQL 唯一依赖」不变式
 - pull producer 回融（在其他项目积累成熟后）
 - 样例学习剩余部分（pattern 归纳，视资源实施）
+- **V3 记忆治理层**（[08-memory-governance.md](./08-memory-governance.md)）：❄️ **已冻结为备选方案**（09 过度设计审计），待真实用户/流量/事故触发再立项。切片预案保留：V3.1a 命中率埋点 → V3.1b QA 规则 → V3.1c QA LLM Judge → V3.2 版本快照与回滚
 - ~~管理前端 2 页 + 学习日志页~~ ✅ 已提前实现（2026-08，超出原计划：5 页 Vue 3 + Vite——记忆与审核 / 学习日志 / 代码库知识卡 / 蒸馏审计 / 检索预览。N6 审核闭环可视化演示）
 
 ---
