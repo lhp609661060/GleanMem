@@ -27,3 +27,7 @@ build/
 
 # 浏览器截图（调试产物）
 browser-screenshots/
+
+# 内容工作流（文章草稿/发布版/反馈，个人维护，不上传 github）
+content/
+.content/
