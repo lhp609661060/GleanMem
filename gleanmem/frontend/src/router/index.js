@@ -21,29 +21,13 @@ const routes = [
     component: () => import('../views/MemoriesView.vue'),
     meta: { title: '记忆与审核' },
   },
-  {
-    path: '/logs',
-    name: 'logs',
-    component: () => import('../views/LogsView.vue'),
-    meta: { title: '学习日志' },
-  },
+  // P1 收敛（09 过度设计审计）：logs/runs/recall 三个低频视图从路由移除，
+  // LogsView.vue / RunsView.vue / RecallView.vue 文件保留以便将来触发条件满足后恢复。
   {
     path: '/cards',
     name: 'cards',
     component: () => import('../views/CardsView.vue'),
     meta: { title: '代码库知识卡' },
-  },
-  {
-    path: '/runs',
-    name: 'runs',
-    component: () => import('../views/RunsView.vue'),
-    meta: { title: '蒸馏审计' },
-  },
-  {
-    path: '/recall',
-    name: 'recall',
-    component: () => import('../views/RecallView.vue'),
-    meta: { title: '检索预览' },
   },
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue') },
 ]
@@ -60,7 +44,7 @@ router.beforeEach((to) => {
   // 角色分区：admin 只在管理台（spaces/users），space 只在业务视图
   const role = getRole()
   const adminOnly = ['spaces', 'docs', 'users']
-  const spaceOnly = ['memories', 'logs', 'cards', 'runs', 'recall']
+  const spaceOnly = ['memories', 'cards']
   if (role === 'admin' && spaceOnly.includes(to.name)) return { name: 'spaces' }
   if (role === 'space' && adminOnly.includes(to.name)) return { name: 'memories' }
   return true

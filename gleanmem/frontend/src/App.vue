@@ -36,12 +36,11 @@ const adminLinks = [
   { name: 'docs', label: '文档' },
   { name: 'users', label: '用户管理', disabled: true, hint: '开发中' },
 ]
+// P1 收敛（09 审计）：低频视图 logs/runs/recall 从导航移除——组件文件保留，
+// 后端审计数据可用 DBeaver/API 直接查看；导航只留两条主线。
 const spaceLinks = [
   { name: 'memories', label: '记忆与审核' },
-  { name: 'logs', label: '学习日志' },
   { name: 'cards', label: '代码库知识卡' },
-  { name: 'runs', label: '蒸馏审计' },
-  { name: 'recall', label: '检索预览' },
 ]
 const links = computed(() => (role.value === 'admin' ? adminLinks : spaceLinks))
 const canBackToAdmin = computed(() => role.value === 'space' && Boolean(getAdminKey()))
