@@ -140,8 +140,20 @@ def ensure_space(backend: Path, base_url: str, space_name: str, force_new: bool)
                 return space_key, agent_id
         log("    已有 YDM_SPACE_KEY 校验失败，重新创建 Space。")
 
+    # D17：创建 Space 属平台管理面，需要 admin key（与后端读同一份 backend/.env）
+    admin_key = read_env(env_file, "YDM_ADMIN_KEY")
+    if not admin_key:
+        sys.exit(
+            f"创建 Space 失败：{env_file} 未配置 YDM_ADMIN_KEY。\n"
+            "请先在后端 .env 里设置 admin key（服务端重启生效）再运行安装。"
+        )
     log(f"[2/5] 创建 Space：{space_name}")
-    status, payload = http_json(base_url + "/api/v1/spaces", method="POST", data={"name": space_name})
+    status, payload = http_json(
+        base_url + "/api/v1/spaces",
+        method="POST",
+        data={"name": space_name},
+        headers={"Authorization": f"Bearer {admin_key}"},
+    )
     if status not in (200, 201) or not isinstance(payload, dict) or "space_key" not in payload:
         sys.exit(f"创建 Space 失败：HTTP {status} {payload}")
     space_key = str(payload["space_key"])

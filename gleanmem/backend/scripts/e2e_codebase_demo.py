@@ -18,6 +18,7 @@ from gleanmem.core.codebase.analyzer import CardDraft
 from gleanmem.core.codebase.scanner import scan_repo
 from gleanmem.core.codebase.projection import render_markdown, write_projection, PROTECTED_MARKER
 from gleanmem.core.database import async_session_factory
+from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models import AgentSpace, WikiDocument, CodebaseRun
 from sqlalchemy import delete
 
@@ -28,10 +29,12 @@ async def main():
     (repo/"api"/"routes.py").write_text("def recall():\n    pass\n")
     (repo/".venv").mkdir(); (repo/".venv"/"junk.py").write_text("vendored")
 
+    # D17 起 POST /spaces 要 admin key；demo 脚本直写库建 Space，不依赖部署配置
     t = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=t, base_url="http://test") as c:
-        r = await c.post("/api/v1/spaces", json={"name":"e2e-v15a"})
-        key, agent_id = r.json()["space_key"], r.json()["agent_id"]
+    async with async_session_factory() as s:
+        space, key = await MemoryManager(s).create_space(name="e2e-v15a")
+        await s.commit()
+        agent_id = space.agent_id
     print(f"1. Space 创建 ✓  agent_id={agent_id[:8]}")
 
     H={"Authorization":f"Bearer {key}"}

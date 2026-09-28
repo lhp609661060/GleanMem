@@ -4,8 +4,11 @@ from __future__ import annotations
 import httpx
 import pytest
 from httpx import ASGITransport
+from sqlalchemy import delete
 
 from gleanmem.config import settings
+from gleanmem.core.database import async_session_factory
+from gleanmem.core.models import AgentSpace
 from gleanmem.main import app
 
 ADMIN_KEY = "ydm_admin_test_key_12345"
@@ -97,3 +100,44 @@ async def test_space_cannot_rotate_others_key(space_client):
 async def test_invalid_admin_key_rejected():
     async with _client({"Authorization": "Bearer wrong-admin"}) as c:
         assert (await c.get("/api/v1/auth/me")).status_code == 401
+
+
+# ---------------------------------------------------------------- D17：创建 Space 仅 admin
+
+"""D17 前 POST /spaces 无鉴权：创建即发 key，未认证者可无限建 Space 拿合法 key。"""
+
+
+async def test_create_space_requires_admin_key(space_client):
+    async with _client() as c:
+        assert (await c.post("/api/v1/spaces", json={"name": "anon"})).status_code == 401
+
+    key, _ = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as c:
+        r = await c.post("/api/v1/spaces", json={"name": "by-space"})
+        assert r.status_code == 401, r.text
+
+
+async def test_admin_can_create_space():
+    async with _client(_admin()) as c:
+        r = await c.post("/api/v1/spaces", json={"name": "by-admin"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["space_key"].startswith("ydm_")
+        agent_id = body["agent_id"]
+
+    # 新 key 立即可用于该 Space 的业务读写
+    async with _client({"Authorization": f"Bearer {body['space_key']}"}) as c:
+        assert (await c.get("/api/v1/spaces/me")).json()["agent_id"] == agent_id
+
+    # 清理：直写库删除（admin 归档不够——测试库不留垃圾）
+    async with async_session_factory() as s:
+        await s.execute(delete(AgentSpace).where(AgentSpace.agent_id == agent_id))
+        await s.commit()
+
+
+async def test_create_space_503_when_admin_key_unconfigured(space_client, monkeypatch):
+    """未配 YDM_ADMIN_KEY：管理面不可用是运维状态，返 503 而非「你的 key 不对」。"""
+    monkeypatch.setattr(settings, "admin_key", "")
+    key, _ = await space_client()
+    async with _client({"Authorization": f"Bearer {key}"}) as c:
+        assert (await c.post("/api/v1/spaces", json={"name": "x"})).status_code == 503

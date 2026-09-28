@@ -10,7 +10,7 @@ from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models.agent_space import AgentSpace
 from gleanmem.orchestrator.scheduler import InvalidSchedule, normalize_cron
 
-from .deps import require_agent, resolve_identity
+from .deps import require_admin, require_agent, resolve_identity
 
 router = APIRouter(prefix="/api/v1/spaces", tags=["spaces"])
 
@@ -47,7 +47,15 @@ class SpaceUpdate(BaseModel):
 
 
 @router.post("")
-async def create_space(body: SpaceCreate, db: AsyncSession = Depends(get_db)):
+async def create_space(
+    body: SpaceCreate,
+    _: str = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建 Space（仅平台 admin）：创建即发 key，是最高权限入口。
+
+    曾是全 API 唯一无鉴权写入口（未认证者可无限建 Space 拿合法 key）。
+    """
     mgr = MemoryManager(db)
     space, space_key = await mgr.create_space(
         name=body.name, description=body.description or ""

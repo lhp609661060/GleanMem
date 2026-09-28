@@ -19,17 +19,24 @@ import sys
 
 import httpx
 
+from gleanmem.config import settings
 from gleanmem.core.codebase.store import card_id
 from gleanmem.core.database import async_session_factory
 from gleanmem.core.models import CodebaseRun, LongTermMemory, WikiDocument
 
 BASE = "http://localhost:8000"
 
+# D17：创建 Space 属平台管理面，需 admin key（读 backend/.env 的 YDM_ADMIN_KEY）
+ADMIN_HEADERS = {"Authorization": f"Bearer {settings.admin_key}"}
+
 
 async def main() -> int:
+    if not settings.admin_key:
+        print("✗ 未配置 YDM_ADMIN_KEY（backend/.env）：创建 Space 需要 admin key", file=sys.stderr)
+        return 1
     async with httpx.AsyncClient(base_url=BASE, timeout=30) as c:
         try:
-            r = await c.post("/api/v1/spaces", json={"name": "前端演示 Space"})
+            r = await c.post("/api/v1/spaces", json={"name": "前端演示 Space"}, headers=ADMIN_HEADERS)
         except httpx.ConnectError:
             print(f"✗ 连不上后端 {BASE}，先运行 `uv run gleanmem`", file=sys.stderr)
             return 1

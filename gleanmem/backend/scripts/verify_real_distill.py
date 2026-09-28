@@ -30,6 +30,7 @@ from gleanmem.config import settings
 from gleanmem.core.codebase.analyzer import CodebaseAnalyzer
 from gleanmem.core.codebase.scanner import scan_repo
 from gleanmem.core.database import async_session_factory
+from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models import AgentSpace, CodebaseRun, WikiDocument
 from gleanmem.core.wiki.db_store import WikiStore
 from gleanmem.main import app
@@ -66,10 +67,12 @@ async def main() -> int:
     print(report.summary())
     print(f"\n即将真实调用 LLM {len(report.modules)} 次。")
 
+    # D17 起 POST /spaces 要 admin key；验证脚本直写库建 Space
     t = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=t, base_url="http://test") as c:
-        r = await c.post("/api/v1/spaces", json={"name": "verify-real-distill"})
-        key, agent_id = r.json()["space_key"], r.json()["agent_id"]
+    async with async_session_factory() as s:
+        space, key = await MemoryManager(s).create_space(name="verify-real-distill")
+        await s.commit()
+        agent_id = space.agent_id
 
     H = {"Authorization": f"Bearer {key}"}
     analyzer = CodebaseAnalyzer()

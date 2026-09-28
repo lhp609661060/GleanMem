@@ -22,6 +22,7 @@ from gleanmem.core.codebase.projection import (
 from gleanmem.core.codebase.scanner import fingerprint, scan_repo
 from gleanmem.core.codebase.store import card_id
 from gleanmem.core.database import async_session_factory
+from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models import (
     AgentSpace, CodebaseRun, LearningLog, PendingEvent, WikiDocument,
 )
@@ -34,10 +35,12 @@ async def main():
     f_core = repo / "core" / "auth.py"; f_core.write_text("def require_agent():\n    return 'a'\n")
     f_api = repo / "api" / "routes.py"; f_api.write_text("def recall():\n    pass\n")
 
+    # D17 起 POST /spaces 要 admin key；demo 脚本直写库建 Space，不依赖部署配置
     t = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=t, base_url="http://test") as c:
-        r = await c.post("/api/v1/spaces", json={"name": "e2e-v15b"})
-        key, agent_id = r.json()["space_key"], r.json()["agent_id"]
+    async with async_session_factory() as s:
+        space, key = await MemoryManager(s).create_space(name="e2e-v15b")
+        await s.commit()
+        agent_id = space.agent_id
     print(f"1. Space ✓  agent_id={agent_id[:8]}")
 
     H = {"Authorization": f"Bearer {key}"}

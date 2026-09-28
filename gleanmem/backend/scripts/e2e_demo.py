@@ -12,14 +12,25 @@ import sys
 
 import httpx
 
+from gleanmem.config import settings
+
+# D17：创建 Space 属平台管理面，需 admin key（读 backend/.env 的 YDM_ADMIN_KEY）
+ADMIN_HEADERS = {"Authorization": f"Bearer {settings.admin_key}"}
+
 
 async def main() -> None:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000"
     print(f"=== gleanmem 端到端演示（{base}）===\n")
+    if not settings.admin_key:
+        sys.exit("✗ 未配置 YDM_ADMIN_KEY（backend/.env）：创建 Space 属平台管理面，需要 admin key")
 
     async with httpx.AsyncClient(base_url=base, timeout=15) as client:
         # 1. 创建 Space（拿 key）
-        r = await client.post("/api/v1/spaces", json={"name": f"e2e-{__import__('uuid').uuid4().hex[:6]}"})
+        r = await client.post(
+            "/api/v1/spaces",
+            json={"name": f"e2e-{__import__('uuid').uuid4().hex[:6]}"},
+            headers=ADMIN_HEADERS,
+        )
         r.raise_for_status()
         space = r.json()
         key = space["space_key"]
@@ -69,7 +80,7 @@ async def main() -> None:
         print(f"[7] 审计：learning_logs {len(logs)} 条，全部 source=observation，decision 可溯源 ✅")
 
         # 8. 隔离：另一个 Space 看不到
-        r2 = await client.post("/api/v1/spaces", json={"name": "e2e-other"})
+        r2 = await client.post("/api/v1/spaces", json={"name": "e2e-other"}, headers=ADMIN_HEADERS)
         key2 = r2.json()["space_key"]
         rp = await client.get("/api/v1/memories", headers={"Authorization": f"Bearer {key2}"})
         assert rp.json() == []

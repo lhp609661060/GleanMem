@@ -7,12 +7,11 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import httpx
 import pytest
-from httpx import ASGITransport
 from sqlalchemy import delete
 
 from gleanmem.core.database import async_session_factory
+from gleanmem.core.manager import MemoryManager
 from gleanmem.core.models import (
     AgentSpace,
     CodebaseRun,
@@ -21,7 +20,6 @@ from gleanmem.core.models import (
     PendingEvent,
     WikiDocument,
 )
-from gleanmem.main import app
 
 _CLEANUP_MODELS = (WikiDocument, LearningLog, LongTermMemory, PendingEvent, CodebaseRun)
 
@@ -63,25 +61,22 @@ async def make_space():
 
 @pytest.fixture
 async def space_client():
-    """经 API 创建 Space（返回 space_key 与 agent_id），可选覆盖 config；结束自动清理。"""
+    """直写库创建 Space（返回 space_key 与 agent_id），可选覆盖 config；结束自动清理。
+
+    不走 POST /api/v1/spaces：D17 起该端点要求 admin key，而测试 Space 的创建
+    不该依赖被测代码的鉴权路径（否则 S2 的用例挂了会连带拖垮全部用 space_client 的用例）。
+    """
     created: list[str] = []
 
     async def _make(config_overrides: dict | None = None) -> tuple[str, str]:
-        transport = ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            r = await client.post(
-                "/api/v1/spaces", json={"name": f"t-{uuid4().hex[:8]}"}
-            )
-            assert r.status_code == 200, r.text
-            key = r.json()["space_key"]
-            agent_id = r.json()["agent_id"]
-        created.append(agent_id)
-        if config_overrides:
-            async with async_session_factory() as s:
-                space = await s.get(AgentSpace, agent_id)
+        async with async_session_factory() as s:
+            mgr = MemoryManager(s)
+            space, key = await mgr.create_space(name=f"t-{uuid4().hex[:8]}")
+            if config_overrides:
                 space.config = {**space.config, **config_overrides}
-                await s.commit()
-        return key, agent_id
+            await s.commit()
+            created.append(space.agent_id)
+            return key, space.agent_id
 
     yield _make
 
