@@ -10,14 +10,16 @@ Dify 后台 → 工具 → MCP → 添加服务器：
 |--------|-----|
 | Transport | SSE |
 | URL | `http://<你的IP>:8000/mcp/sse` |
-| Headers | `X-Agent-ID: <你的 agent_id>` |
+| Headers | `X-Space-Key: <你的 space_key>` |
 
 - 注册成功会自动发现 3 个工具：`recall` / `load_memory` / `memorize`
-- 每个需要独立记忆空间的 Agent 配一个 MCP Server（不同 `X-Agent-ID`）；共享记忆则共用同一 Server
+- 每个需要独立记忆空间的 Agent 配一个 MCP Server（不同 `X-Space-Key`）；共享记忆则共用同一 Server
+- 身份由 space_key 哈希查库解析出 `agent_id`（与 REST 同一套强度）；`X-Agent-ID` 可选带上，值不一致会被拒（403）
+- 内网演示若要沿用旧的「仅填 `X-Agent-ID`」方式，服务端设 `YDM_MCP_AUTH_REQUIRED=false`（公网禁用）
 
 **已知坑（spike 实测）**：
 - MCP 注册 403 → Dify `.env` 加 `SSRF_PROXY_ALLOW_PRIVATE_IPS=<宿主机IP>`
-- Dify **不透传** `conversation_id` / `app_id` / `user_id`——身份只能靠注册时填的 `X-Agent-ID`
+- Dify **不透传** `conversation_id` / `app_id` / `user_id`——身份只能靠注册时填的 space_key
 
 ## 2. 导入 Workflow 模板
 

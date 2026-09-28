@@ -3,7 +3,7 @@
 #
 # 导入后需要修改:
 #   1. Agent 节点 → 系统提示词 → 改业务描述
-#   2. Agent 节点 → 工具 → 绑定你的 MCP Server（X-Agent-ID 填本 Space 的 agent_id）
+#   2. Agent 节点 → 工具 → 绑定你的 MCP Server（X-Space-Key 填本 Space 的 space_key）
 #   3. Flush 节点 → URL → 改成你的 memory-service 地址
 #   4. Flush 节点 → Headers → 把 ydm_REPLACE_WITH_SPACE_KEY 换成你的 space_key
 #      （身份由 Bearer key 解析，Body 只带 session_id，不再传 agent_id）
