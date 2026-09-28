@@ -6,7 +6,7 @@
 
 | 文档 | 内容 | 用途 |
 |------|------|------|
-| [01-design.md](./01-design.md) | 完整设计方案（**v3**：多智能体外挂记忆平台） | **必读** — 最终方案 |
+| [01-design.md](./01-design.md) | 完整设计方案（**v3.9**：多智能体外挂记忆平台） | **必读** — 最终方案 |
 | [02-review-round1.md](./02-review-round1.md) | 一轮评审：代码级问题 | 参考 — 实现细节 |
 | [03-review-round2.md](./03-review-round2.md) | 二轮评审：未验证假设 | 参考 — 风险清单 |
 | [04-review-round3.md](./04-review-round3.md) | 三轮评审：根本方向质疑 | 参考 — 战略取舍 |
@@ -15,8 +15,8 @@
 | [07-architect-review.md](./07-architect-review.md) | v3.1 架构评审报告（差距核验 + 新发现 + 开工顺序） | **动手前必读** — 开工依据 |
 | [08-memory-governance.md](./08-memory-governance.md) | 行业记忆模块调研核实 + V3 记忆治理层设计（QA Gate / 命中率 / 版本回滚） | **V3 必读** — 竞品对照与借鉴清单（09 审计后重新定位为研究备忘） |
 | [09-overdesign-audit.md](./09-overdesign-audit.md) | 过度设计审计：底座克制、周边轻度过度，分级整改建议 | **诊断** — 是否过度设计的结论 |
-| [10-hardening-design.md](./10-hardening-design.md) | 加固设计：安全边界（MCP 鉴权 / Space 创建）、flush 两阶段事务、事件死信（D16–D20） | **实施中** — 4 个缺陷簇的决策与取舍 |
-| [11-hardening-spec.md](./11-hardening-spec.md) | 加固实施规格 S1–S5：改动点、契约、验收标准、用例清单 | **实施中** — 逐项验收依据 |
+| [10-hardening-design.md](./10-hardening-design.md) | 加固设计：安全边界（MCP 鉴权 / Space 创建）、flush 两阶段事务、事件死信（D16–D20） | **过程记录** — 缺陷簇 C1–C5 的决策与取舍；结论已合入 01-design **v3.9** |
+| [11-hardening-spec.md](./11-hardening-spec.md) | 加固实施规格 S1–S5：改动点、契约、验收标准、用例清单 | **过程记录** — 含验收结果与 5 条实施偏差，以实现为准 |
 
 ## 快速索引
 

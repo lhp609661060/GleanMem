@@ -1,4 +1,4 @@
-# gleanmem：多智能体外挂记忆平台（v3.8）
+# gleanmem：多智能体外挂记忆平台（v3.9）
 
 > **版本说明**：v3 是对 v2 的产品方向重写；v3.1 在 v3 冻结范围上，把 06 调研的 codebase 蒸馏纳入为正式候选方向。v2 的检索、存储、审计设计大部分保留，变化集中在四处：
 > 1. **定位**：从「Dify 专用插件」→「多智能体（Dify / DSH / 其他）共享的外挂记忆平台」
@@ -20,6 +20,8 @@
 >
 > **v3.8 修订记录**（2026-09）：落实审计 P2——**llm 学习模式降级为实验开关**：默认 heuristic，llm 模式标注「未经基准验证更优」，代码保留但停止为其增加 prompt/契约复杂度；去留待未来 A/B（llm vs heuristic 命中率）决定。前端下线 Logs/Runs/Recall 三个低频视图（文件保留）。
 >
+> **v3.9 修订记录**（2026-09）：加固轮合入主线，过程记录见 [10-hardening-design.md](./10-hardening-design.md)（缺陷 C1–C5 → 决策 D16–D20）与 [11-hardening-spec.md](./11-hardening-spec.md)（含实施偏差 5 条）。四处正面改写：**① MCP SSE 改密钥鉴权**——`X-Agent-ID` 明文可伪造（07 R6 就此关闭），统一为 `X-Space-Key`，REST 与 MCP 共用 `resolve_space_key` 同一套哈希查库强度；**② `POST /spaces` 收归 admin**（未配 admin key 返 503）；**③ flush 两阶段化**——advisory lock 挂独占连接，LLM 分析移出事务，快照带批上限，落库前 `FOR UPDATE` 重选；**④ 事件死信化**——重试耗尽不再删数据，置 `status='dead'` 冻结 + 复活端点。杂项（常量时间比较、`api_key_hash` 唯一索引、CORS 白名单、MCP 异常不回显、chat 幂等）归 D20。已实施、已验收（pytest 全绿 + 浏览器端到端），迁移 head `c7d1e5a90f32`。
+>
 > **v3.3 修订记录**（2026-08）：V1.5a + V1.5b 全部落地（45 测试绿；batch 端到端 10 步、增量端到端 8 步全通过）。实现中发现并修复 flush 分派 bug（`source != "observation"` → 白名单 `in ("chat","example")`，否则 codebase 事件被学成 memory）。
 >
 > **v3.2 修订记录**（2026-08，V1 验收后、V1.5 开工前）：V1 全部 🔴/🟡 差距关闭（23 测试绿、P0-3 100%）；闭环 V1.5 的 5 个开工前设计点 —— 叙述层 md 定为知识卡的**单向投影**（D11）、新增 `codebase_runs` **run 级审计**表（D12）、新增独立 `/api/v1/codebase/*` 端点（D13）、CodebaseAnalyzer 模型与 token 硬预算（D14）。
@@ -29,7 +31,7 @@
 | # | 决策 | 理由 |
 |---|------|------|
 | D1 | 定位升级为「多智能体外挂记忆」，不再绑定 Dify | 用户明确：给 Dify、DSH 或其他智能体做外挂记忆 |
-| D2 | 身份统一抽象为 `agent_id`；REST 用 **per-space API Key**，MCP SSE 沿用 `X-Agent-ID` header | 一把 API Key 同时解决「DSH 走 REST 接入」和「业务系统 push 观察事件」两件事 |
+| D2 | 身份统一抽象为 `agent_id`；REST 用 **per-space API Key**，MCP SSE 沿用 `X-Agent-ID` header（**已被 D16 取代**：v3.9 起 MCP 也走 space_key） | 一把 API Key 同时解决「DSH 走 REST 接入」和「业务系统 push 观察事件」两件事 |
 | D3 | **删除 `query_db` 工具** | 原为 Dify 测试用的临时工具；业务数据访问改由 push-first 观察学习承载，不再让 LLM 直连业务库 |
 | D4 | 观察学习 **push-first**；pull 推迟到其他项目，成熟后以 producer 形式回融 | push 信任成本最低、工程最小；pull 的连接器/快照复杂度不在本项目背 |
 | D5 | `pending_events` 增加 `source` 维度（chat/example/observation）与 `dedup_key` | 四类学习共用收件箱；push 幂等必需 |
@@ -43,6 +45,11 @@
 | D13 | 新增独立 `/api/v1/codebase/*` 端点，**不复用 observations** | 事件结构不同，硬塞会污染 observation 分析器契约（07 评审 §5.2 建议） |
 | D14 | CodebaseAnalyzer 用既有 `YDM_LLM_*` 模型 + Space 级 token 硬预算 + dry-run 先报后跑 | 不新增供应商依赖；防一次全量烧光演示预算（07 评审 §5.4） |
 | D15 | 行业调研沉淀为 [08-memory-governance.md](./08-memory-governance.md)：能力对照/借鉴清单持续有效；V3 治理层（QA Gate + 命中率埋点 + 版本快照）**仅作备选设计** | 调研核实：拾忆审批能力已属第一梯队；治理能力以 PG 表 + 既有 LLM 配置即可补齐薄壳，不追随 Graphiti/Letta/MemOS 底座范式，守住 PG-only。**但无真实消费者前不实施（09 审计冻结）** |
+| D16 | **MCP SSE 端强制 `X-Space-Key`**：key 哈希查库解析 `agent_id`，`X-Agent-ID` 降级为一致性校验（不一致 403）；`YDM_MCP_AUTH_REQUIRED=false` 仅作内网演示逃生口 | 明文 `X-Agent-ID` 知道即可读写任意 Space（07 R6）；Dify 的 MCP 注册本就支持自定义 header，把内容换成 space_key 是一次配置的成本。**REST 与 MCP 的身份强度必须相同**，否则弱的那一套会抵消强的那一套 |
+| D17 | `POST /api/v1/spaces` 加 `require_admin`；未配 `YDM_ADMIN_KEY` 时返 503 | 创建 Space 即签发一把有完整读写权的 key，是最高权限入口，只能属于平台管理面。503 而非 401：调用方要的是运维动作（初始化 admin key），不是换 key |
+| D18 | **flush 两阶段化**：advisory lock 挂在独占连接上跨三段存活 → 短事务读快照（`status='pending'`，`ORDER BY created_at LIMIT YDM_FLUSH_BATCH_SIZE`）→ 无事务无行锁调 LLM → 短事务 `FOR UPDATE` 按 id 重选后落库 | 原先 LLM 在事务/行锁内跑，锁时长等于网络往返，会把连接池占满。阶段2 重选是正确性关键：LLM 期间被外部删掉的事件绝不为其写决策。**残留**：`source=codebase` 分支的 `IncrementalDistiller` 仍在锁内调 LLM（单模块粒度 + token 预算，风险量级不同），本期只吃批上限与 status 过滤 |
+| D19 | **事件死信化**：重试达 `YDM_EVENT_MAX_RETRIES`（默认 3）时置 `status='dead'` 而非删除，flush 只取 pending；`GET /learning/events?status=dead` + `POST /learning/events/{id}/revive` | scheduler 的 at-most-once 与「重试后删事件」组合出来的最终语义是**数据丢失**——两处决策各自合理，组合从未被审视。死信把「丢」改成「冻」，复活一个端点的事 |
+| D20 | 杂项：`hmac.compare_digest` 比 admin key、`api_key_hash` 唯一索引、CORS 来源走 `YDM_CORS_ORIGINS`、MCP 工具异常对客户端只返 `internal error`、REST 提交侧补可选 `dedup_key` | 鉴权每次按 hash 查库，无索引即每次顺序扫表；异常原样回显会把 SQL/路径等内部信息交给客户端；chat 与 observation/codebase 幂等能力对齐（冲突返 200 `duplicate`，不是 409） |
 
 ---
 
@@ -94,7 +101,7 @@ yd-agent 项目已冻结代码开发。四层记忆体系 + LLM 驱动学习模�
 | d 定时任务学习 | —（非 source） | 对任意来源积压素材批量跑 flush | 对应来源的产物 | cron |
 | 代码库蒸馏（V1.5 候选主线） | codebase | CodebaseAnalyzer：batch 全量 + event 增量 | wiki 双层（叙述层 md + 知识卡） | cron 或 CI webhook |
 
-**不变式：所有来源共用同一个收件箱 `pending_events` 和同一条 flush 管线**（advisory lock、审计、衰减全部复用）。新学习方式 = 新增「素材怎么进收件箱」+「收件箱里怎么分析」，不新起炉灶。
+**不变式：所有来源共用同一个收件箱 `pending_events` 和同一条 flush 管线**（advisory lock、批上限快照、两阶段落库、审计、衰减、死信全部复用）。新学习方式 = 新增「素材怎么进收件箱」+「收件箱里怎么分析」，不新起炉灶。
 
 ---
 
@@ -104,7 +111,7 @@ yd-agent 项目已冻结代码开发。四层记忆体系 + LLM 驱动学习模�
 ┌─────────────┐   ┌──────────────┐   ┌────────────────┐
 │   Dify      │   │  DSH / 其他   │   │   业务系统      │
 │  MCP SSE    │   │  REST        │   │  REST push     │
-│ X-Agent-ID  │   │ Bearer key   │   │ Bearer key     │
+│ X-Space-Key │   │ Bearer key   │   │ Bearer key     │
 └──────┬──────┘   └──────┬───────┘   └───────┬────────┘
        └─────────────────┼───────────────────┘
                          ▼
@@ -150,20 +157,22 @@ yd-agent 项目已冻结代码开发。四层记忆体系 + LLM 驱动学习模�
 
 | 接入方 | 协议 | 身份来源 | 鉴权 |
 |--------|------|---------|------|
-| Dify | MCP SSE | `X-Agent-ID` header（Dify MCP Server 配置时填写） | V1 无鉴权，**内网信任边界** |
+| Dify | MCP SSE | `X-Space-Key: <space_key>` header → 查得 agent_id（v3.9，D16） | per-space API Key |
 | DSH / 其他 Agent | REST（`/api/v1/recall` 等） | `Authorization: Bearer <space_key>` → 查得 agent_id | per-space API Key |
 | 业务系统（观察 push） | REST（`/api/v1/observations`） | 同上 | per-space API Key |
-| 管理端（前端） | REST | 同上（admin key，V1.1） | per-space API Key |
+| 管理端（前端） | REST | 同上；平台管理面用 admin key（`YDM_ADMIN_KEY`） | admin key / per-space API Key |
+
+三条接入路径共用同一个解析函数（`api/deps.py:resolve_space_key`）：对 key 做 SHA-256 后按 `api_key_hash` 索引查库，并排除 `status = 'archived'`（归档即失效）。**身份强度必须一致**——只要有一条面弱（如按明文 `agent_id` 认人），known-agent_id 就等于该 Space 的全部读写权。
 
 ### API Key 设计（V1）
 
 - 每个 Agent Space 创建时生成一把 `space_key`（如 `ydm_<32位随机>`），**只展示一次**
-- 库中只存 `api_key_hash`（SHA-256）+ `api_key_prefix`（前 8 位，用于 UI 辨认）
-- 请求带 `Authorization: Bearer <space_key>` → 中间件 hash 比对 → 注入 `agent_id`
-- 轮换接口 `POST /api/v1/spaces/{agent_id}/keys` 推迟到 V1.1
-- **Dify MCP 路径不受影响**：仍走 `X-Agent-ID`，与 API Key 两者都解析到同一个 `agent_id` 概念
+- 库中只存 `api_key_hash`（SHA-256）+ `api_key_prefix`（前 8 位，用于 UI 辨认）；`api_key_hash` 带唯一索引（v3.9，D20）——鉴权是每请求一次的热路径
+- REST 请求带 `Authorization: Bearer <space_key>` → hash 查库 → 注入 `agent_id`
+- MCP SSE 建连时带 `X-Space-Key: <space_key>` → **同一个解析函数** → 注入 `agent_id`（v3.9，D16）；可同时带 `X-Agent-ID`，值与 key 解析结果不一致则 403
+- 轮换接口 `POST /api/v1/spaces/{agent_id}/keys`（admin 或本 Space 自助）
 
-> 为什么 MCP 不加鉴权：Dify 的 MCP 注册只支持自定义 header，不支持 Bearer 流程；V1 面向内网部署（v2 已明确「认证鉴权 V1 内网」），MCP 端点按信任网络处理。若将来暴露公网，MCP 端再加 key 校验（在 `X-Agent-ID` 之外允许 `Authorization`）。
+> **为什么 MCP 也上 key（v3.9 反转 v1 的「内网信任边界」）**：MCP 与 REST 读写的是同一个 Space，`X-Agent-ID` 可伪造意味着只要知道一个 agent_id 就能读写该 Space——弱的一面把强的一面抵消掉。Dify 的 MCP 注册支持自定义 header，把 header 内容换成 space_key 即可，无需 Bearer 流程。`YDM_MCP_AUTH_REQUIRED=false` 保留旧的「仅信 X-Agent-ID」约定，只供内网演示与 spike 脚本，公网禁用。
 
 ### 新增接入层不改变核心
 
@@ -186,22 +195,25 @@ CREATE TABLE pending_events (
                                              --   example: 由 b 归纳管线定义
     context TEXT NOT NULL,                   -- 素材内容（chat=描述；observation=事件 JSON；example=样例文本）
     marked_type VARCHAR,
-    dedup_key VARCHAR,                       -- 幂等键（observation 必填 = 业务方 event_id）
+    dedup_key VARCHAR,                       -- 幂等键（observation 必填 = 业务方 event_id；chat 可选，v3.9）
     metadata JSONB DEFAULT '{}',             -- 溯源信息（见下）
     session_id VARCHAR,
     retry_count INT DEFAULT 0,
+    status VARCHAR(8) NOT NULL DEFAULT 'pending',  -- v3.9 新增：pending | dead（重试耗尽的死信）
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE UNIQUE INDEX idx_pending_dedup ON pending_events(agent_id, dedup_key)
     WHERE dedup_key IS NOT NULL;
 CREATE INDEX idx_pending_agent ON pending_events(agent_id, created_at);
+CREATE INDEX idx_pending_events_flush ON pending_events(agent_id, status, created_at);  -- v3.9：flush 快照路径
 ```
 
 **关键约定**：
 
-- `dedup_key` + 唯一索引实现幂等：业务方 push 重试、我方重复消费都不产生重复记忆（`ON CONFLICT DO NOTHING`）。
+- `dedup_key` + 唯一索引实现幂等：业务方 push 重试、我方重复消费都不产生重复记忆（`ON CONFLICT DO NOTHING`）。v3.9 起 REST 提交（chat 源）也能带 `dedup_key`，冲突时返 200 `{"status":"duplicate","event_id":<既有 id>}` 而不是错误码——客户端重试要的是「已收到」。
 - `metadata` 承载**溯源**：`source`、来源系统、实体标识、样例 id 列表、快照指纹等。知识落地时随 `learning_logs` 一并固化，实现「每条知识可 trace 回素材」。
-- flush 管线（advisory lock → SELECT FOR UPDATE → 分析 → commit → 日志 → 删除 → 衰减）**保持不变**，只是分析器按 `source` 分派。
+- **flush 管线（v3.9 两阶段化，D18）**：独占连接持 advisory lock → 短事务读快照（`status='pending'`，按 `created_at` 取最多 `YDM_FLUSH_BATCH_SIZE` 条）并立即提交 → **无事务、无行锁**下调 LLM → 短事务按 id `FOR UPDATE` 重选（仍在库的才处理）→ 写决策与日志 → 消费出箱 → 提交。行锁持有时间从「LLM 网络往返」缩到毫秒级，LLM 故障期间数据库完全无锁无事务。
+- **重试耗尽 = 冻结不是删除（D19）**：达 `YDM_EVENT_MAX_RETRIES` 时写 FAILED 审计日志并把事件置 `status='dead'`，此后不再进快照；`POST /api/v1/learning/events/{id}/revive` 可置回 pending 并清零计数。
 
 ---
 
@@ -287,7 +299,7 @@ POST /api/v1/observations        Authorization: Bearer <space_key>
   - user：事件列表 JSON
 - **防幻觉**：`evidence` 必须非空（无引用即拒绝，同 pattern 纪律）；`llm_raw_response` 必落库
 - **产物映射**：`target=memory` → `long_term_memories`（metadata 固化 source/origin/evidence）；`target=wiki` → `wiki_documents`（id=`obs-<uuid8>`、description 必填 ≤100 字）
-- **失败处理**：同 P1-1（空/坏 JSON → 保留事件 + retry_count，≥3 次写 failed 日志）
+- **失败处理**：同 P1-1（空/坏 JSON → 保留事件 + `retry_count` 递增；达 `YDM_EVENT_MAX_RETRIES`（默认 3）时写 failed 日志并把事件置 `status='dead'` 冻结，**不再删除**，v3.9 D19）
 - **heuristic/direct 模式**：不做归纳，直接存为 reference 记忆（title=事件描述 ≤200 字），metadata 固化溯源
 
 #### 护栏（观察比聊天更自主，护栏更严）
@@ -311,7 +323,7 @@ V1 不做 pull（连接业务库、快照 diff），该能力在其他项目单�
   - `config.schedule`（5 段 cron，服务器本地时区）+ `config.schedule_enabled`（暂停）+ `config.catch_up`（重启补跑，受 `YDM_SCHEDULER_CATCHUP_WINDOW_MINUTES` 窗口约束，默认 720 分钟）。写入即由 `PUT /api/v1/spaces/{id}` 校验，非法表达式 422 拒绝。
   - **无 jobstore**：APScheduler 只做「每 20s 一次 tick」，到不到点由 croniter 对着 DB 判定 → Space 增删改不必同步 job 列表，也就没有 resync 端点这一类额外 machinery。
   - **多副本互斥**：`agent_spaces.last_fired_slot`（分钟粒度槽位）由单条原子 `UPDATE ... WHERE last_fired_slot IS DISTINCT FROM :slot` 抢占，抢不到就跳过；Space 内部另有 flush 的 advisory lock 兜底。
-  - **每槽至多执行一次**：占槽先于执行，flush 失败不回退槽位、不重试——事件留在收件箱由下一批兜住，最坏是延迟不是丢失，换取 LLM 故障期间无重试风暴。暂停语义由 `schedule_enabled()` 统一判定（JSONB 字符串 `"false"` 也生效），且暂停优先于补跑。
+  - **每槽至多执行一次**：占槽先于执行，flush 失败不回退槽位、不重试——事件留在收件箱由下一批兜住（v3.9 后最坏是延迟，重试耗尽也只是转 dead 冻结，不再有删除路径），换取 LLM 故障期间无重试风暴。暂停语义由 `schedule_enabled()` 统一判定（JSONB 字符串 `"false"` 也生效），且暂停优先于补跑。
   - **可观测**：`last_scheduled_flush` 记完成时间，`GET /api/v1/learning/schedules` 返回 cron 合法性、下次触发时刻、最近触发槽位（响应带 `cron_timezone`，因为 cron 是本地时间而时间戳存 UTC）。
   - **管理台**：「空间管理」编辑表单可填 schedule 与启用开关，列表「调度」列显示下次触发时刻；取消调度的规范写法是 `PUT config: {"schedule": null}`（null 删键），空串 `""` 为同义旧写法、保留兼容（管理台清空输入框仍发空串）。
 - d 与 b/c 的组合就是「定时归纳样例」「定时蒸馏观察」——trigger 与 source 正交的价值所在。
@@ -351,7 +363,7 @@ codebase 蒸馏是 v3 引入的**第一种 batch 型学习管线**，与既有 e
 - **实现要点（V1.5b 已落地）**：
   - 指纹比对以卡上 `metadata.fingerprints` 为基准，**无变化直接 skip，不花 token**；
   - 服务端零仓库访问权 ⇒ 重生成只用事件里附带的 snippet（≤4KB/文件），不读磁盘；
-  - 每个事件独立成败：`updated` / `skipped_unchanged` / `skipped_protected` / `deleted` 消费出箱，`failed` 保留并递增 `retry_count`（复用 P1-1）；
+  - 每个事件独立成败：`updated` / `skipped_unchanged` / `skipped_protected` / `deleted` 消费出箱，`failed` 保留并递增 `retry_count`（复用 P1-1，达阈值转 `status='dead'`）；
   - 决策级写 `learning_logs`（`event_type=module_changed:<action>`），run 级写 `codebase_runs`（`mode=incremental`），两层审计都不断；
   - flush 的 source 分派必须是**白名单**（`in ("chat","example")`）——原 `!= "observation"` 会让 codebase 事件误入 chat 分支学成 memory。
 
@@ -501,6 +513,8 @@ GET  /api/v1/codebase/cards?sync_pending=true   # CLI sync 拉取投影
 1. **删除 `query_db`**（D3）：不再向 Agent 暴露任何 SQL 能力。
 2. **`load_memory` 增加归属校验**：按 `agent_id` 过滤，只能加载本 Space 的记忆（修复 v2 实现的越权缺陷）。
 
+**v3.9 变更**（D16 / D20）：工具执行层的身份来源从「信 `X-Agent-ID` header」改为「信 space_key 的查库解析结果」，`agent_id` 仍永不进工具参数；工具内部异常对客户端只返 `{"error":"internal error"}`，细节进日志。
+
 ### Recall Orchestrator
 
 保持 v2 设计不变：并行三路（热记忆 weight Top20 + 冷记忆 tsvector Top5 + wiki tsvector Top3）→ 按 id 合并去重 → 规则重排（weight×0.4 + title 重叠×0.4 + content 重叠×0.2）→ Top5 + hint。**它是函数不是 Agent**：无 loop、无 tool calling、V1 无 LLM 决策。V2 可选小模型 cross-encoder 重排。
@@ -522,13 +536,14 @@ CREATE TABLE agent_spaces (
     agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR NOT NULL,
     description TEXT,
-    api_key_hash VARCHAR(64),            -- v3 新增：SHA-256(space_key)
+    api_key_hash VARCHAR(64),            -- v3 新增：SHA-256(space_key)；v3.9 加唯一索引（鉴权热路径，无索引即顺序扫表）
     api_key_prefix VARCHAR(8),           -- v3 新增：UI 辨认用
     config JSONB DEFAULT '{"decay_per_day":0.95,"min_weight":0.1,"max_memories":5000,"learning_mode":"heuristic"}',
     status VARCHAR DEFAULT 'active',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE UNIQUE INDEX uq_agent_spaces_key_hash ON agent_spaces(api_key_hash);  -- v3.9，D20
 ```
 
 ### `long_term_memories`
@@ -590,11 +605,11 @@ CREATE TABLE examples (
 
 ## REST API（v3）
 
-鉴权：除 `/health` 外全部要求 `Authorization: Bearer <space_key>`（V1.1 前管理类接口暂用同 key）。
+鉴权：除 `/health` 外全部要求 `Authorization: Bearer <space_key>`；MCP SSE 走 `X-Space-Key`，两者共用同一个哈希查库解析（v3.9 D16）。管理类接口按面分级：`POST /spaces` 只认 admin key，未配置 `YDM_ADMIN_KEY` 时返 503（v3.9 D17）；其余接口按 caller 归属过滤（space 只能碰自己的 Space）。
 
 ```
 # Agent Space
-POST   /api/v1/spaces                        # 创建（返回 space_key，仅一次）
+POST   /api/v1/spaces                        # 创建（返回 space_key，仅一次）——仅 admin key（v3.9 D17）
 GET    /api/v1/spaces
 GET    /api/v1/spaces/{agent_id}
 PUT    /api/v1/spaces/{agent_id}
@@ -619,9 +634,11 @@ DELETE /api/v1/wiki/{id}
 POST   /api/v1/recall                        # { "intent": "..." }，agent_id 取自 key
 
 # 学习
-POST   /api/v1/learning/events               # = memorize（REST 版）
-POST   /api/v1/learning/flush                # 触发分析（webhook / cron 共用）
+POST   /api/v1/learning/events               # = memorize（REST 版）；可带 dedup_key 幂等（v3.9）
+POST   /api/v1/learning/flush                # 触发分析（webhook / cron 共用）；单次最多 YDM_FLUSH_BATCH_SIZE 条
 GET    /api/v1/learning/logs?page=1
+GET    /api/v1/learning/events?status=dead   # 死信查询（v3.9 D19，按 caller 过滤，50/页）
+POST   /api/v1/learning/events/{id}/revive   # 复活死信：status→pending、retry_count 清零（v3.9 D19）
 
 # 观察（v3 新增）
 POST   /api/v1/observations                  # 业务方 push 观察事件（幂等）
@@ -647,17 +664,17 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
        Body: { "session_id": "{{sys.conversation_id}}" }   # agent_id 由 key 解析
 ```
 
-注意：v3 起 Dify 的 MCP 注册仍填 `X-Agent-ID`，而 Flush 的 HTTP 节点改带 API Key（Dify 支持自定义 header）。
+注意：v3.9 起 Dify 的 MCP 注册 header 填 `X-Space-Key: <space_key>`（与 Flush 的 `Bearer <space_key>` 是同一把 key，Dify 支持自定义 header）；`X-Agent-ID` 只作可选的一致性校验。内网演示若沿用旧写法，服务端设 `YDM_MCP_AUTH_REQUIRED=false`。
 
 ### DSH / 其他 Agent（REST 直连）
 
-1. 创建 Space，拿 `space_key`
+1. 创建 Space（**带 admin key**，v3.9 D17），拿 `space_key`
 2. 平台侧把 memory 调用翻译成 REST：检索用 `POST /api/v1/recall`，提交用 `POST /api/v1/learning/events`，会话结束回调 `POST /api/v1/learning/flush`
-3. 若平台支持 MCP client，也可复用 SSE 端点（`X-Agent-ID` 方式）
+3. 若平台支持 MCP client，也可复用 SSE 端点（`X-Space-Key` 方式，与 REST 同一把 key、同一套解析）
 
 ### 业务系统（观察 push）
 
-1. 创建 Space，拿 `space_key`
+1. 创建 Space（带 admin key），拿 `space_key`
 2. 按 §c 的 schema 调 `POST /api/v1/observations`，事件 id 自己生成、保证幂等
 3. 演示场景：仓库内提供 **feeder 脚本**——读 `seed_steel.sql` 类数据，构造「发货单 创建→确认→发货」事件流灌入，全程不需要真业务库
 
@@ -667,7 +684,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 
 ### 前置：Spike ✅ 已完成
 
-见 [spike/SPIKE-REPORT.md](../../spike/SPIKE-REPORT.md)：MCP 通路可行、Agent 会主动调工具、`X-Agent-ID` 隔离有效。**唯一未验证项 P0-3（tsvector + zhparser 中文召回率）顺延到 V1 Week 1 day 1-2**，验证不通过（<40%）则直接换 pgvector（V1 排期 +1~2 周）。**P0-3 的前置是 zhparser 三环修复**（镜像 / 扩展与配置 / 触发器配置，见差距清单 N7/N8）——三环不修，验证对象不存在、测试必然误判。**P0-3 已于 2026-08 实测通过**：plainto_tsquery 的 AND 语义命中率仅 25%，改「AND 优先、空结果降级 OR + ts_rank」后 20/20 = 100%、p95 5.4ms——**保留 tsvector + zhparser 路线，不切 pgvector**。
+见 [spike/SPIKE-REPORT.md](../../spike/SPIKE-REPORT.md)：MCP 通路可行、Agent 会主动调工具、`X-Agent-ID` 隔离有效（v3.9 起该 header 换成 `X-Space-Key`，走的是同一条注册通路，无需重验）。**唯一未验证项 P0-3（tsvector + zhparser 中文召回率）顺延到 V1 Week 1 day 1-2**，验证不通过（<40%）则直接换 pgvector（V1 排期 +1~2 周）。**P0-3 的前置是 zhparser 三环修复**（镜像 / 扩展与配置 / 触发器配置，见差距清单 N7/N8）——三环不修，验证对象不存在、测试必然误判。**P0-3 已于 2026-08 实测通过**：plainto_tsquery 的 AND 语义命中率仅 25%，改「AND 优先、空结果降级 OR + ts_rank」后 20/20 = 100%、p95 5.4ms——**保留 tsvector + zhparser 路线，不切 pgvector**。
 
 ### V1（约 3 周，在现有 v2 代码骨架上）
 
@@ -718,6 +735,19 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 | 🟡 | REST 无鉴权、无 agent_id 隔离；flush 由 body 传 `agent_id`（违反身份不变式） | `api/spaces.py`、`api/webhooks.py:13-20` ✅ 已修复（Week 2：`api/deps.py` require_agent 中间件 + 全路由 Bearer 鉴权 + flush 改 key 解析身份，webhooks.py 并入 learning.py 后删除） |
 | 🟢 | 无 `backend/tests/`；`seed.py` 与 Alembic 双轨建表需统一 | — ✅ 测试已建（day 3-5：`tests/` 12 用例全绿，覆盖 P1-1/审计/衰减/解析/锁/ranker；pytest 需 session 级 loop 配置）；✅ **双轨已清**（2026-09 删除 `backend/seed.py`——建表唯一入口是 `alembic upgrade head`，造数据用 `scripts/seed_demo_space.py` 或 pytest fixture，不再有两份 schema 定义） |
 
+### 加固轮（v3.9，2026-09-28 已实施并验收）
+
+输入是 2026-09 的全库缺陷分析，过程记录见 [10-hardening-design.md](./10-hardening-design.md) / [11-hardening-spec.md](./11-hardening-spec.md)（后者文末列 5 条实施偏差，以实现为准）。
+
+| 级别 | 缺陷 → 决策 | 位置 | 状态 |
+|------|------------|------|------|
+| 🔴 | C1 MCP SSE 零鉴权，明文 `X-Agent-ID` 可伪造读写任意 Space（07 R6） | `mcp/server.py`、`api/deps.py:resolve_space_key` | ✅ D16：SSE 建连强制 `X-Space-Key`，key 哈希查库；不一致 403、无效/归档 401；`YDM_MCP_AUTH_REQUIRED=false` 仅内网逃生口 |
+| 🔴 | C2 `POST /spaces` 无鉴权，未认证者可建 Space 拿合法 key | `api/spaces.py` | ✅ D17：`require_admin`；未配 admin key 时 503（判定在身份解析之后，故「完全不带 key」仍是 401） |
+| 🟡 | C3 flush 在 advisory lock + `FOR UPDATE` 事务内同步调 LLM，锁时长不可控且无批上限 | `core/learning.py` | ✅ D18：两阶段化（锁挂独占连接 → 快照 → 无事务调 LLM → `FOR UPDATE` 重选落库），`YDM_FLUSH_BATCH_SIZE=50` |
+| 🟡 | C4 重试耗尽**删除**事件，与调度 at-most-once 组合出的最终语义是数据丢失 | `core/learning.py`、`models/pending_event.py` | ✅ D19：`status='dead'` 冻结 + `GET /learning/events` / `POST .../revive`；迁移 `c7d1e5a90f32` |
+| 🟡 | C5 杂项：admin key 非常量时间比较、`api_key_hash` 无索引、CORS 硬编码全开、MCP 异常回显内部信息、chat 源无幂等键 | `api/deps.py`、`models/agent_space.py`、`main.py`、`api/learning.py` | ✅ D20：`hmac.compare_digest` + 唯一索引 + `YDM_CORS_ORIGINS` + 统一 `internal error` + REST 侧 `dedup_key`（冲突返 200 `duplicate`） |
+| 🟢 | 残留：`source=codebase` 增量分支的 `IncrementalDistiller` 仍在锁内调 LLM | `core/learning.py` codebase 分支 | ⏸ D18 明确出界（单模块粒度 + token 硬预算，风险量级不同），本期只吃批上限与 `status` 过滤，完整两阶段化待后续 |
+
 ---
 
 ## 核心设计决策
@@ -725,7 +755,7 @@ Flush: POST {{MEMORY_URL}}/api/v1/learning/flush
 1. **为什么「共用收件箱」而不是每类学习建一套管线？** —— flush 的锁、审计、衰减、重试都是通用能力；新学习方式的差异只在「入箱」和「分析器」。共用收件箱让 4 类需求共享同一套可靠性。
 2. **为什么观察学习 push-first？** —— push 事件自带 diff（「从 A 到 B」），最难的工程（连库、发现 schema、快照 diff）整块消失；信任成本最低（我不碰对方内网）；与现有 webhook 机制同构。pull 的唯一必要性是「对方只有库、没有事件出口」，留作未来 producer。
 3. **为什么删除 query_db？** —— 它是 Dify 测试期的临时工具，本质是「LLM 裸 SQL 直查业务库」：越权读面（整库）、无隔离、无审计。业务数据访问的正确形态是观察学习（系统主动、持续、可审计），不是 Agent 现场查询。
-4. **为什么身份用 per-space API Key？** —— 业务系统 push 和 DSH REST 接入本质是同一个问题（非 Dify 客户端怎么认身份），一把 key 解两个；MCP 的 `X-Agent-ID` 是 Dify 平台的协议约束，两者并存、解析到同一 `agent_id`。
+4. **为什么身份用 per-space API Key？** —— 业务系统 push 和 DSH REST 接入本质是同一个问题（非 Dify 客户端怎么认身份），一把 key 解两个。v3.9 起 MCP 也用它（`X-Space-Key`）：三条接入面认的是同一个 Space，身份强度必须相同，否则可伪造的明文 `X-Agent-ID` 会把 keyed 那两套的强度抵消掉（07 R6）。
 5. **为什么 pattern 要强制溯源 + 人工审核？** —— 归纳是 LLM 幻觉高发区；「无引用即拒绝」+「pending 才能召回」把幻觉挡在召回层之外，同时保住演示时的审计说服力。
 6. **为什么保持 Recall Orchestrator 为函数、LearningModel 为单次调用？** —— 同 v2：记忆服务保持简单，不引入 Agent 复杂度（见 [04-review-round3.md](./04-review-round3.md) 的 over-design 警告）。
 7. **为什么 codebase 蒸馏走 batch/event 二分，且是 pull 纪律的合法例外？** —— 初次全量是「生成」而非「逐条学习决策」，走收件箱会污染它；增量 diff 是事件，天然进收件箱。codebase 读的是用户自己的本地代码，无凭证、无越权面，pull 的信任顾虑不成立——它是第一个在本项目实现的 pull 型 producer，正好验证 producer 扩展点的通用性。自动更新必须跳过 `metadata.protected` 条目（增量与修订保护捆绑发布，缺一不可，Qoder 教训）。
@@ -752,6 +782,9 @@ V1.5a（约 1.5-2 周）：batch 全量 + `protected` 修订保护 + 双层产�
 
 ### V2
 内置调度器 ✅ 已实现（2026-09）；管理前端 ✅ 提前实现；pgvector ✅ 判定为不做（P0-3 复验 100%）。剩余：业务观察 pull producer 回融、样例学习剩余部分（pattern 归纳）。
+
+### 加固（v3.9，穿插实施，不占版本）
+D16–D20（MCP 密钥鉴权 / Space 创建收归 admin / flush 两阶段化 / 事件死信化 / 杂项）✅ 已实施并验收（2026-09-28，迁移 head `c7d1e5a90f32`）。**破坏性变更一处**：MCP 默认强制 `X-Space-Key`，Dify 侧需改一次 header。剩余：codebase 增量分支的两阶段化、dead 事件管理 UI（本期只给端点）。
 
 ---
 

@@ -1,6 +1,6 @@
 # 11 · 加固实施规格（对应 10-hardening-design.md）
 
-> 状态：**已实施（S1–S5 代码完成，待 `uv run pytest` + `alembic upgrade head` 验收）**。
+> 状态：**已实施并验收**（S1–S5 代码完成，`alembic upgrade head` 至 `c7d1e5a90f32` + `uv run pytest` 全绿 + 浏览器端到端），结论已合入 01-design **v3.9**。
 > 每项含改动点、契约、验收标准。顺序即建议实施顺序（S1→S5），
 > S1/S2 独立可先行；S3/S4 共享一次代码重构窗口；S5 随批。
 > 全程身份不变式不变：`agent_id` 只由接入层解析注入，永不进工具参数/请求体。
