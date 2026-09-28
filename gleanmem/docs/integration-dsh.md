@@ -4,10 +4,13 @@
 
 ## 1. 拿 space_key
 
+建 Space 是管理面操作，需要平台 admin key（`YDM_ADMIN_KEY`，未配置则该端点返 503）：
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/spaces \
+  -H "Authorization: Bearer $YDM_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"ds h-助手的记忆空间"}'
+  -d '{"name":"dsh-助手的记忆空间"}'
 # → 返回 agent_id 与 space_key（仅此一次明文，之后不可再查）
 ```
 
@@ -19,9 +22,12 @@ curl -X POST http://localhost:8000/api/v1/spaces \
 |------|------|
 | 检索记忆 | `POST /api/v1/recall` `{"intent":"自然语言描述需要什么"}` |
 | 提交学习事件 | `POST /api/v1/learning/events` `{"type":"user_feedback|agent_mark","context":"..."}` |
+| ↳ 幂等提交 | 同上，加可选 `"dedup_key":"消息id"`：同 Space 同 key 重复提交只留一条 |
 | 触发学习（会话结束） | `POST /api/v1/learning/flush` |
 | 查看记忆 | `GET /api/v1/memories?status=approved&page=1` |
 | 审计日志 | `GET /api/v1/learning/logs?page=1` |
+| 死信事件 | `GET /api/v1/learning/events?status=dead&page=1` |
+| 复活死信 | `POST /api/v1/learning/events/{event_id}/revive` |
 | 观察事件 push | `POST /api/v1/observations`（见 integration-push.md） |
 
 ## 3. 平台侧接线约定（以 DSH 为例）
@@ -32,7 +38,7 @@ curl -X POST http://localhost:8000/api/v1/spaces \
 2. **记忆**：用户告知规则/纠正 → 调 `POST /api/v1/learning/events`
 3. **会话结束**：调 `POST /api/v1/learning/flush`（可放平台的生命周期回调）
 
-若平台支持 MCP client，也可复用 SSE 端点（`/mcp/sse` + `X-Agent-ID`），与 Dify 同一套。
+若平台支持 MCP client，也可复用 SSE 端点（`/mcp/sse` + `X-Space-Key: <space_key>`），与 Dify 同一套。
 
 ## 4. 隔离保证
 

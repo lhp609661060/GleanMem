@@ -40,12 +40,13 @@ const tab = ref('dify')
         <tbody>
           <tr><td>类型</td><td>SSE</td></tr>
           <tr><td>URL</td><td><span class="mono">http://&lt;host&gt;:8000/mcp/sse</span></td></tr>
-          <tr><td>Headers</td><td><span class="mono">X-Agent-ID: &lt;agent_id&gt;</span></td></tr>
+          <tr><td>Headers</td><td><span class="mono">X-Space-Key: &lt;space_key&gt;</span></td></tr>
         </tbody>
       </table>
       <p class="muted">
-        注意：Dify 的 MCP 注册只支持自定义 header、不支持 Bearer 鉴权，所以身份走
-        <span class="mono">X-Agent-ID</span>（与 REST 的 space_key 解析到同一个 agent_id）。
+        Dify 的 MCP 注册只支持自定义 header、不支持 Bearer 鉴权，所以 space_key 走
+        <span class="mono">X-Space-Key</span> header：服务端对它做哈希查库解析出
+        <span class="mono">agent_id</span>，与 REST 侧同一套身份强度。
       </p>
 
       <h3>第 2 步：三个工具</h3>
@@ -71,13 +72,14 @@ const tab = ref('dify')
         </tbody>
       </table>
       <p class="muted">
-        Flush 用 API Key 而非 X-Agent-ID，是因为 Dify 的 HTTP 节点支持自定义 header，可以走 Bearer。
+        MCP 与 Flush 用的是同一把 <span class="mono">space_key</span>，只是载体不同：MCP 注册只支持自定义
+        header（<span class="mono">X-Space-Key</span>），HTTP 节点可以走标准 <span class="mono">Bearer</span>。
       </p>
 
       <h3>快速开始</h3>
       <p>
         仓库根目录提供现成模板 <span class="mono">测试.yml</span>（记忆增强助手：Start → Agent → Flush），
-        可直接导入 Dify，再填上 MCP URL / X-Agent-ID / space_key 即可。
+        可直接导入 Dify，再填上 MCP URL 与 space_key（MCP header、Flush Bearer 各一处）即可。
       </p>
     </div>
   </div>
@@ -97,13 +99,15 @@ const tab = ref('dify')
         <li>已有一个 Space 的 <span class="mono">space_key</span>（在「空间管理」里创建，或 <span class="mono">POST /api/v1/spaces</span>）。</li>
       </ul>
 
-      <h3>三个 REST 接口</h3>
+      <h3>REST 接口</h3>
       <table>
         <thead><tr><th>动作</th><th>接口</th><th>说明</th></tr></thead>
         <tbody>
           <tr><td>检索记忆</td><td class="mono">POST /api/v1/recall</td><td>body：<span class="mono">{"intent": "…"}</span></td></tr>
-          <tr><td>提交记忆</td><td class="mono">POST /api/v1/learning/events</td><td>body：<span class="mono">{"type": "…", "context": "…"}</span></td></tr>
+          <tr><td>提交记忆</td><td class="mono">POST /api/v1/learning/events</td><td>body：<span class="mono">{"type": "…", "context": "…"}</span>，可选 <span class="mono">"dedup_key": "消息id"</span> 幂等重投</td></tr>
           <tr><td>触发学习</td><td class="mono">POST /api/v1/learning/flush</td><td>对话结束统一分析入库</td></tr>
+          <tr><td>死信事件</td><td class="mono">GET /api/v1/learning/events</td><td>重试耗尽被冻结的事件（<span class="mono">?status=dead</span>，默认值）</td></tr>
+          <tr><td>复活死信</td><td class="mono">POST /api/v1/learning/events/&lt;id&gt;/revive</td><td>回 pending、重试计数归零，下次 flush 重新处理</td></tr>
         </tbody>
       </table>
       <p class="muted">所有请求都带 <span class="mono">Authorization: Bearer &lt;space_key&gt;</span>（身份从 key 解析，不在 body 里）。</p>
@@ -130,7 +134,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/learning/flush \
         <li>
           <b>方式 A（推荐，若 DSH 支持 MCP client）</b>：复用 SSE 端点
           <span class="mono">http://&lt;host&gt;:8000/mcp/sse</span>，header 填
-          <span class="mono">X-Agent-ID: &lt;agent_id&gt;</span>，即可获得与 Dify 相同的
+          <span class="mono">X-Space-Key: &lt;space_key&gt;</span>，即可获得与 Dify 相同的
           <span class="mono">recall / load_memory / memorize</span> 三工具。
         </li>
         <li>

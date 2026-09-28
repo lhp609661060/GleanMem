@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, text
+from sqlalchemy import Index, String, Text, DateTime, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,3 +39,7 @@ class AgentSpace(Base, TimestampMixin):
         String(20), default="active", server_default=text("'active'")
     )
     purged_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # 鉴权每次请求都要按 hash 查库：无索引即每次顺序扫表；唯一约束同时挡住极小概率碰撞。
+    # NULL 不参与唯一性（测试/导入的 Space 可以没有 key）。
+    __table_args__ = (Index("uq_agent_spaces_key_hash", api_key_hash, unique=True),)
