@@ -5,7 +5,12 @@ Three modes:
 - heuristic:  Rule-based: every memorize → store; dedupe by title_key.
 - direct:     memorize → store directly (Agent already judged).
 
-Flush runs under PG advisory lock keyed by agent_id.
+Flush 三段（D18）：
+① 独占连接上抢 pg_try_advisory_lock（session 级锁跨事务存活，用于互斥）；
+② 只读快照（短事务，最多 settings.flush_batch_size 条）后立即提交；
+③ 无事务、无行锁地调 LLM；
+④ 按 id 重选（SELECT … FOR UPDATE，短事务）应用决策并删除已消费事件。
+拆开的原因：advisory lock + FOR UPDATE 跨 LLM 网络往返持有，锁时长不可控。
 Every decision writes a learning_logs row (including raw LLM output).
 """
 
@@ -15,13 +20,14 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gleanmem.config import settings
+from gleanmem.core.database import engine
 
 from .metrics import metrics
 from .long_term.pg_store import LongTermStore
@@ -51,6 +57,32 @@ class MemoryDecision:
     raw_response: str | None = None  # LLM 原始输出（审计落库）
 
 
+@dataclass
+class EventSnapshot:
+    """阶段② 读到的事件视图。
+
+    LLM 期间不持有 ORM 对象也不持有事务，所以分析器只认这个快照；
+    阶段④ 再按 id 重选真实行，快照里已消失的事件直接跳过。
+    """
+
+    id: str
+    source: str
+    event_type: str
+    context: str
+    session_id: str | None
+    dedup_key: str | None
+
+
+@dataclass
+class _Analysis:
+    """LLM/规则分析结果（阶段③ 产出，阶段④ 消费）。"""
+
+    chat: list[MemoryDecision] = field(default_factory=list)
+    chat_raw: str | None = None
+    obs: list[MemoryDecision] = field(default_factory=list)
+    obs_raw: str | None = None
+
+
 class LearningModel:
     def __init__(self, session: AsyncSession):
         self._s = session
@@ -72,84 +104,163 @@ class LearningModel:
         min_weight: float = 0.1,
         max_memories: int = 0,
     ) -> list[MemoryDecision] | None:
-        """Flush pipeline: acquire lock → fetch events → analyse → commit → log.
+        """Flush pipeline: lock → snapshot → analyse (no tx) → apply.
 
         Returns None when another flush for the same agent_id holds the lock
         (caller should surface this as a "skipped" status).
         max_memories <= 0 视为不限制；> 0 时 flush 末尾软删溢出条数。
         """
 
-        # 1. Acquire advisory lock (non-blocking)
+        # 阶段①：锁挂在独占连接上。工作 session 提交后连接归池、session 级锁会丢，
+        # 所以不能用 self._s 持锁跨 LLM。
         lock_key = f"flush_{agent_id}"
-        result = await self._s.execute(
-            text("SELECT pg_try_advisory_lock(hashtext(:key))"),
-            {"key": lock_key},
-        )
-        if not result.scalar():
-            logger.info("Flush for %s already running, skip", agent_id)
-            return None
-
-        try:
-            return await self._run(
-                agent_id, learning_mode, decay_per_day, min_weight, max_memories
-            )
-        finally:
-            await self._s.execute(
-                text("SELECT pg_advisory_unlock(hashtext(:key))"),
+        async with engine.connect() as lock_conn:
+            result = await lock_conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:key))"),
                 {"key": lock_key},
             )
+            if not result.scalar():
+                logger.info("Flush for %s already running, skip", agent_id)
+                return None
+            # 锁是 session 级、跨事务存活；提交掉只读事务，别让 idle-in-transaction
+            # 在 LLM 期间挂着（膨胀 vacuum 目标）。
+            await lock_conn.commit()
+            try:
+                snapshot = await self._load_snapshot(agent_id)
+                if not snapshot:
+                    return []
+                analysis = await self._analyze(agent_id, learning_mode, snapshot)
+                return await self._apply(
+                    agent_id,
+                    learning_mode,
+                    analysis,
+                    [e.id for e in snapshot],
+                    decay_per_day,
+                    min_weight,
+                    max_memories,
+                )
+            finally:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:key))"),
+                    {"key": lock_key},
+                )
+                await lock_conn.commit()
 
-    async def _run(
+    async def _load_snapshot(self, agent_id: str) -> list[EventSnapshot]:
+        """阶段②：只读快照，短事务。批上限把单次 LLM 的 payload 规模钉死。"""
+        stmt = (
+            select(
+                PendingEvent.id,
+                PendingEvent.source,
+                PendingEvent.event_type,
+                PendingEvent.context,
+                PendingEvent.session_id,
+                PendingEvent.dedup_key,
+            )
+            .where(
+                PendingEvent.agent_id == agent_id,
+                PendingEvent.status == "pending",  # 死信不再进 flush
+            )
+            .order_by(PendingEvent.created_at)
+            .limit(settings.flush_batch_size)
+        )
+        rows = (await self._s.execute(stmt)).all()
+        await self._s.commit()
+        return [
+            EventSnapshot(
+                id=r.id,
+                source=r.source,
+                event_type=r.event_type,
+                context=r.context,
+                session_id=r.session_id,
+                dedup_key=r.dedup_key,
+            )
+            for r in rows
+        ]
+
+    async def _analyze(
+        self, agent_id: str, learning_mode: str, snapshot: Sequence[EventSnapshot]
+    ) -> _Analysis:
+        """阶段③：此处没有任何事务/行锁，LLM 网络往返多慢都不影响库。
+
+        注意：分派必须**白名单**式（== "chat"/"example"），不能写 != "observation"——
+        否则 source=codebase 的事件会误入 chat 分支被当聊天素材学习。
+        """
+        chat_events = [e for e in snapshot if e.source in ("chat", "example")]
+        obs_events = [e for e in snapshot if e.source == "observation"]
+        analysis = _Analysis()
+
+        if chat_events:
+            if learning_mode == LearningMode.DIRECT:
+                analysis.chat = self._direct_analyze(chat_events)
+            elif learning_mode == LearningMode.LLM:
+                analysis.chat, analysis.chat_raw = await self._llm_analyze(chat_events)
+            else:  # heuristic
+                analysis.chat = await self._heuristic_analyze(chat_events, agent_id)
+
+        if obs_events:
+            if learning_mode == LearningMode.LLM:
+                analysis.obs, analysis.obs_raw = await self._observation_analyze_llm(
+                    obs_events
+                )
+            else:
+                analysis.obs = await self._observation_analyze_rule(obs_events)
+
+        return analysis
+
+    async def _apply(
         self,
         agent_id: str,
         learning_mode: str,
+        analysis: _Analysis,
+        snapshot_ids: Sequence[str],
         decay_per_day: float,
         min_weight: float,
-        max_memories: int = 0,
+        max_memories: int,
     ) -> list[MemoryDecision]:
-        # 2. SELECT … FOR UPDATE
+        """阶段④：按 id 重选（FOR UPDATE）后应用决策。
+
+        快照里已被外部删掉的事件不在 present 中：不写决策、不删、不计 retry。
+        """
         stmt = (
             select(PendingEvent)
-            .where(PendingEvent.agent_id == agent_id)
+            .where(
+                PendingEvent.agent_id == agent_id,
+                PendingEvent.id.in_(list(snapshot_ids)),
+            )
             .order_by(PendingEvent.created_at)
             .with_for_update()
         )
-        result = await self._s.execute(stmt)
-        events = result.scalars().all()
-
-        if not events:
+        present = list((await self._s.execute(stmt)).scalars().all())
+        if not present:
             return []
 
-        # 3-5. 按 source 分派分析并处理
-        # 注意：分派必须**白名单**式（== "chat"/"example"），不能写 != "observation"——
-        # 否则 V1.5 的 source=codebase 事件会误入 chat 分支被当聊天素材学习。
-        chat_events = [e for e in events if e.source in ("chat", "example")]
-        obs_events = [e for e in events if e.source == "observation"]
-        codebase_events = [e for e in events if e.source == "codebase"]
+        present_ids = {e.id for e in present}
+        chat_events = [e for e in present if e.source in ("chat", "example")]
+        obs_events = [e for e in present if e.source == "observation"]
+        codebase_events = [e for e in present if e.source == "codebase"]
         processed: list[MemoryDecision] = []
-        chat_raw: str | None = None
-        obs_raw: str | None = None
 
         # chat 分支：决策与事件 1:1 绑定
         if chat_events:
-            if learning_mode == LearningMode.DIRECT:
-                ds = self._direct_analyze(chat_events)
-            elif learning_mode == LearningMode.LLM:
-                ds, chat_raw = await self._llm_analyze(chat_events)
-            else:  # heuristic
-                ds = await self._heuristic_analyze(chat_events, agent_id)
-
+            ds = [d for d in analysis.chat if not d.event_id or d.event_id in present_ids]
             if not ds:
                 # P1-1：无决策时事件不得删除
-                await self._handle_undecided(chat_events, agent_id, chat_raw, learning_mode)
+                await self._handle_undecided(
+                    chat_events, agent_id, analysis.chat_raw, learning_mode
+                )
             else:
                 evt_map = {e.id: e.event_type for e in chat_events}
                 decided_ids: set[str] = set()
                 for d in ds:
                     await self._commit_and_log(
-                        d, agent_id, evt_map.get(d.event_id, ""),
-                        chat_events[0].session_id, learning_mode,
-                        d.raw_response or chat_raw, "chat",
+                        d,
+                        agent_id,
+                        evt_map.get(d.event_id, ""),
+                        chat_events[0].session_id,
+                        learning_mode,
+                        d.raw_response or analysis.chat_raw,
+                        "chat",
                     )
                     # 只删除成功提交的：FAILED（含 commit 失败）必须保留走 P1-1 重试，
                     # 否则 Python 层异常会丢事件（PG 层异常由整事务 rollback 兜底侥幸安全）。
@@ -161,27 +272,34 @@ class LearningModel:
                     )
                 undecided = [e for e in chat_events if e.id not in decided_ids]
                 if undecided:
-                    await self._handle_undecided(undecided, agent_id, chat_raw, learning_mode)
+                    await self._handle_undecided(
+                        undecided, agent_id, analysis.chat_raw, learning_mode
+                    )
             processed += ds
 
         # observation 分支：归纳决策与事件批绑定（evidence 引用），成功即整批删除
         if obs_events:
-            if learning_mode == LearningMode.LLM:
-                ds, obs_raw = await self._observation_analyze_llm(obs_events)
-            else:
-                ds = await self._observation_analyze_rule(obs_events)
-
+            ds = [d for d in analysis.obs if d.event_id in present_ids or not d.event_id]
             if not ds:
-                await self._handle_undecided(obs_events, agent_id, obs_raw, learning_mode)
+                await self._handle_undecided(
+                    obs_events, agent_id, analysis.obs_raw, learning_mode
+                )
             else:
                 for d in ds:
                     await self._commit_and_log(
-                        d, agent_id, "observation", obs_events[0].session_id,
-                        learning_mode, d.raw_response or obs_raw, "observation",
+                        d,
+                        agent_id,
+                        "observation",
+                        obs_events[0].session_id,
+                        learning_mode,
+                        d.raw_response or analysis.obs_raw,
+                        "observation",
                     )
                 # 整批绑定语义：任一 commit 失败则整批保留走 P1-1 重试，不删除事件
                 if any(d.action == DecisionAction.FAILED for d in ds):
-                    await self._handle_undecided(obs_events, agent_id, obs_raw, learning_mode)
+                    await self._handle_undecided(
+                        obs_events, agent_id, analysis.obs_raw, learning_mode
+                    )
                 else:
                     obs_ids = [e.id for e in obs_events]
                     await self._s.execute(
@@ -190,21 +308,28 @@ class LearningModel:
             processed += ds
 
         # codebase 分支（V1.5b）：指纹 diff → 单模块重生成，产物是 wiki 知识卡
+        # 已知残留：IncrementalDistiller 仍在锁内调 LLM（单模块粒度 + token 预算），
+        # 完整两阶段化另议。
         if codebase_events:
-            processed += await self._codebase_incremental(agent_id, codebase_events, learning_mode)
+            processed += await self._codebase_incremental(
+                agent_id, codebase_events, learning_mode
+            )
 
-        # 6. Decay weights（读 Space 配置，不再硬编码）
+        # Decay weights（读 Space 配置，不再硬编码）
         await self._store.decay_weights(agent_id, decay_per_day, min_weight)
 
-        # 7. 上限治理：超出 max_memories 时软删最低权重记忆（配置项此前未接通）
+        # 上限治理：超出 max_memories 时软删最低权重记忆
         if max_memories > 0:
             archived = await self._store.archive_overflow(agent_id, max_memories)
             if archived:
                 logger.info(
                     "Space %s memory overflow: archived %d (limit=%d)",
-                    agent_id, archived, max_memories,
+                    agent_id,
+                    archived,
+                    max_memories,
                 )
 
+        await self._s.commit()
         return processed
 
     async def _codebase_incremental(
@@ -303,7 +428,7 @@ class LearningModel:
 
     # -- analysers -------------------------------------------------------
 
-    def _direct_analyze(self, events: Sequence[PendingEvent]) -> list[MemoryDecision]:
+    def _direct_analyze(self, events: Sequence[EventSnapshot]) -> list[MemoryDecision]:
         return [
             MemoryDecision(
                 action=DecisionAction.STORE,
@@ -318,7 +443,7 @@ class LearningModel:
         ]
 
     async def _heuristic_analyze(
-        self, events: Sequence[PendingEvent], agent_id: str
+        self, events: Sequence[EventSnapshot], agent_id: str
     ) -> list[MemoryDecision]:
         decisions: list[MemoryDecision] = []
         for e in events:
@@ -345,7 +470,7 @@ class LearningModel:
         return decisions
 
     async def _llm_analyze(
-        self, events: Sequence[PendingEvent]
+        self, events: Sequence[EventSnapshot]
     ) -> tuple[list[MemoryDecision], str]:
         """Call LLM to classify events.
 
@@ -456,7 +581,7 @@ class LearningModel:
     # -- observation analysers（契约见 01-design §c 观察分析器契约）--------
 
     async def _observation_analyze_rule(
-        self, events: Sequence[PendingEvent]
+        self, events: Sequence[EventSnapshot]
     ) -> list[MemoryDecision]:
         """heuristic/direct：观察事件不做归纳，直接存 reference 记忆并固化溯源。"""
         decisions: list[MemoryDecision] = []
@@ -484,7 +609,7 @@ class LearningModel:
         return decisions
 
     async def _observation_analyze_llm(
-        self, events: Sequence[PendingEvent]
+        self, events: Sequence[EventSnapshot]
     ) -> tuple[list[MemoryDecision], str]:
         """llm：按冻结契约归纳业务规律；无引用即拒绝；失败交 P1-1 重试。"""
         if not settings.llm_api_key:
@@ -579,10 +704,16 @@ class LearningModel:
         raw: str | None,
         learning_mode: str,
     ) -> None:
-        """P1-1：无决策的事件保留并累加 retry_count；≥3 次写 failed 日志后移除。"""
+        """P1-1 + D19：无决策的事件累加 retry_count；达阈值转死信（标 dead，不删）。
+
+        原实现在第 3 次失败后 `delete(e)` —— 与调度器的 at-most-once 组合起来，
+        LLM 持续故障的最终语义是**丢数据**（留审计不留数据）。死信化把「丢」改成「冻」：
+        数据仍在库、不再进 flush，可由 POST /learning/events/{id}/revive 复活。
+        """
         for e in events:
             e.retry_count = (e.retry_count or 0) + 1
-            if e.retry_count >= 3:
+            if e.retry_count >= settings.event_max_retries:
+                e.status = "dead"
                 self._s.add(
                     LearningLog(
                         agent_id=agent_id,
@@ -593,11 +724,19 @@ class LearningModel:
                         decision_action=DecisionAction.FAILED.value,
                         decision_target="long_term",
                         analyzer_mode=learning_mode,
-                        error_message="analysis returned no decision after retries",
+                        error_message=(
+                            f"analysis returned no decision after "
+                            f"{settings.event_max_retries} retries; event dead-lettered"
+                        ),
                         llm_raw_response=raw,
                     )
                 )
-                await self._s.delete(e)
+                logger.warning(
+                    "Event %s in space %s dead-lettered after %d retries",
+                    e.id,
+                    agent_id,
+                    e.retry_count,
+                )
 
     # -- commit + log ----------------------------------------------------
 

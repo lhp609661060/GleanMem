@@ -32,9 +32,18 @@ class PendingEvent(Base, TimestampMixin):
     )
     extra_meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, server_default=text("'{}'::jsonb"))
     retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    status: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+        comment="pending=待处理 | dead=重试耗尽的死信（保留数据，不再进 flush）",
+    )
 
     __table_args__ = (
         Index("idx_pending_agent", agent_id, "created_at"),
+        # flush 快照查询路径：agent_id + status='pending' 按 created_at 取前 N 条
+        Index("idx_pending_events_flush", agent_id, "status", "created_at"),
         Index(
             "idx_pending_dedup",
             agent_id,

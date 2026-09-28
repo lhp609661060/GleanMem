@@ -100,8 +100,12 @@ async def test_llm_empty_decisions_keep_events_and_increment_retry(make_space):
         assert mem_count == 0
 
 
-async def test_llm_retry_exhausted_logs_failed_and_removes(make_space):
-    """P1-1：retry_count 已达 2 的失败事件，再失败一次 → 写 failed 日志并移除。"""
+async def test_llm_retry_exhausted_logs_failed_and_dead_letters(make_space):
+    """P1-1 + D19：retry_count 已达 2 的失败事件，再失败一次 → 写 failed 日志并转死信。
+
+    原实现此处 delete(e)：数据只剩审计、无法挽回。dead-letter 后事件仍在库（status='dead'），
+    可经 POST /api/v1/learning/events/{id}/revive 复活。
+    """
     agent_id = await make_space(learning_mode="llm")
     async with async_session_factory() as s:
         await _add_events(s, agent_id, n=2, retry_count=2)
@@ -115,7 +119,8 @@ async def test_llm_retry_exhausted_logs_failed_and_removes(make_space):
             .scalars()
             .all()
         )
-        assert events == []
+        assert len(events) == 2, "重试耗尽不得丢数据"
+        assert all(e.status == "dead" for e in events)
 
         logs = (
             (await s.execute(select(LearningLog).where(LearningLog.agent_id == agent_id)))
